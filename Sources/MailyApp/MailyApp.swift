@@ -4,7 +4,62 @@ import MailyUI
 import MailyCore
 
 @main
-struct MailyApp: App {
+enum MailyMain {
+    static func main() {
+        switch HelperMode.parse(CommandLine.arguments) {
+        case .syncOnly:
+            runHelper()
+            exit(0)
+        case .normal:
+            MailyAppScene.main()
+        }
+    }
+
+    /// Headless sync path used by the LaunchAgent. In this v1 there is no
+    /// persisted OAuth-bound account, so `startSync()` will fail at the
+    /// token-refresh step and land the engine in `.error` — same as the
+    /// normal app on first launch. The point of this entry point right now
+    /// is wiring: `@main` dispatches here, no SwiftUI Scene is created, and
+    /// `exit(0)` runs after a finite delay. A persisted account replaces
+    /// the placeholder OAuth plumbing in a later milestone.
+    private static func runHelper() {
+        let semaphore = DispatchSemaphore(value: 0)
+        Task.detached {
+            let db = try! MailyDatabase(location: .inMemory)
+            try! await db.queue.write { try Account(id: "local", email: "you@maily.app").insert($0) }
+            let accountRepo = AccountRepository(queue: db.queue)
+            let tokenStore = InMemoryTokenStore()
+            let oauthConfig = OAuthConfig(
+                clientID: "placeholder",
+                clientSecret: "placeholder",
+                redirectURI: "http://127.0.0.1/oauth/callback"
+            )
+            let tokenEndpoint = TokenEndpoint(config: oauthConfig)
+            let session = AuthenticatedSession(
+                account: "you@maily.app",
+                tokenStore: tokenStore,
+                tokenEndpoint: tokenEndpoint
+            )
+            let client = GmailClient(session: session)
+            let engine = SyncEngine(
+                client: client,
+                db: db.queue,
+                accountRepo: accountRepo,
+                accountID: "local"
+            )
+            await engine.startSync()
+            // Give the pipeline a moment to settle into `.watching` or
+            // `.error`, then stop. Real OAuth-bound builds will replace
+            // this with a deterministic single-pass drain.
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            await engine.stop()
+            semaphore.signal()
+        }
+        semaphore.wait()
+    }
+}
+
+struct MailyAppScene: App {
     private let threadRepo: ThreadRepository
     private let messageRepo: MessageRepository
     private let syncEngine: SyncEngine
