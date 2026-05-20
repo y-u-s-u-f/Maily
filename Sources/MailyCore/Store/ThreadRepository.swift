@@ -33,6 +33,15 @@ public struct ThreadRepository {
         }
     }
 
+    public func observeAll(accountId: String) -> ValueObservation<ValueReducers.Fetch<[MailThread]>> {
+        ValueObservation.tracking { db in
+            try MailThread
+                .filter(Column("account_id") == accountId)
+                .order(Column("last_message_at").desc)
+                .fetchAll(db)
+        }
+    }
+
     public func observeInbox(accountId: String, limit: Int = 200) -> ValueObservation<ValueReducers.Fetch<[MailThread]>> {
         ValueObservation.tracking { db in
             try MailThread
