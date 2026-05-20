@@ -21,6 +21,32 @@ final class MutationDrainTests: XCTestCase {
         return (db, client)
     }
 
+    /// Variant of the shared fixture whose underlying `TokenStore` is
+    /// EMPTY — `loadRefreshToken` returns nil, so the first refresh
+    /// attempt surfaces `AuthenticatedSessionError.missingRefreshToken`.
+    private func makeFixtureWithoutRefreshToken(threadLabels: [String] = []) throws -> (MailyDatabase, GmailClient) {
+        let db = try MailyDatabase(location: .inMemory)
+        try db.queue.write { db in
+            try Account(id: "acct", email: "u@x").insert(db)
+            try MailThread(id: "t1", accountId: "acct", labelIds: threadLabels).insert(db)
+        }
+        let store = InMemoryTokenStore() // no saveRefreshToken call
+        let urlSession = URLSession.stubbed()
+        let endpoint = TokenEndpoint(
+            config: OAuthConfig(clientID: "c", clientSecret: "s", redirectURI: "http://127.0.0.1/cb"),
+            session: urlSession
+        )
+        let auth = AuthenticatedSession(
+            account: "a@example.com",
+            tokenStore: store,
+            tokenEndpoint: endpoint,
+            session: urlSession,
+            sleeper: { _ in }
+        )
+        let client = GmailClient(session: auth, userID: "me")
+        return (db, client)
+    }
+
     private func tokenStub(_ req: URLRequest) -> (HTTPURLResponse, Data)? {
         guard req.url?.host == "oauth2.googleapis.com" else { return nil }
         let body = Data(#"{"access_token":"at","expires_in":3600,"scope":"s","token_type":"Bearer"}"#.utf8)
@@ -400,6 +426,98 @@ final class MutationDrainTests: XCTestCase {
 
         // No permanent-failure callbacks.
         XCTAssertEqual(failures.count, 0)
+    }
+
+    func testRunOnceOnMissingRefreshTokenLeavesRowUntouchedAndStopsPass() async throws {
+        // Mirror of the needsReauth test: `.missingRefreshToken` is a
+        // session-wide config failure — every subsequent call would
+        // also fail — so the pass stops without touching any row, no
+        // rollback, no permanent-failure callbacks.
+        let (db, client) = try makeFixtureWithoutRefreshToken(threadLabels: ["INBOX"])
+        try await db.queue.write { dbConn in
+            try MailThread(id: "t-other", accountId: "acct", labelIds: ["INBOX"]).insert(dbConn)
+        }
+        let firstId = try insertMutation(
+            db,
+            kind: .markRead,
+            payloadJson: try MutationPayload.encode(MutationPayload.ThreadOnly(threadId: "t1")),
+            createdAt: Date(timeIntervalSince1970: 1_000)
+        )
+        let secondId = try insertMutation(
+            db,
+            kind: .markRead,
+            payloadJson: try MutationPayload.encode(MutationPayload.ThreadOnly(threadId: "t-other")),
+            createdAt: Date(timeIntervalSince1970: 2_000)
+        )
+
+        // No handler needed — the session never reaches the network; it
+        // throws `.missingRefreshToken` from `refreshAccessToken()` before
+        // dispatching the URL request.
+        StubURLProtocol.handler = { _ in
+            XCTFail("no Gmail request should be issued without a refresh token")
+            return (HTTPURLResponse(url: URL(string: "https://x")!, statusCode: 500, httpVersion: nil, headerFields: nil)!, Data())
+        }
+
+        let failures = FailureLog()
+        let drain = MutationDrain(db: db.queue, client: client, sleeper: { _ in })
+        await drain.setOnPermanentFailure { mid, err in
+            failures.record(id: mid, error: err)
+        }
+        await drain.runOnce()
+
+        // Both rows must be untouched (no attempts++, no last_error).
+        let first = try XCTUnwrap(try fetchMutation(db, id: firstId))
+        XCTAssertEqual(first.attempts, 0, "missingRefreshToken must not bump attempts")
+        XCTAssertNil(first.lastError, "missingRefreshToken must not write last_error")
+        let second = try XCTUnwrap(try fetchMutation(db, id: secondId))
+        XCTAssertEqual(second.attempts, 0)
+        XCTAssertNil(second.lastError)
+
+        // No rollback: the optimistic-removed UNREAD must not be re-added.
+        let t1 = try await db.queue.read { try MailThread.fetchOne($0, key: "t1") }
+        let thread = try XCTUnwrap(t1)
+        XCTAssertFalse(thread.labelIds.contains("UNREAD"), "missingRefreshToken must not trigger rollback")
+
+        // No permanent-failure callbacks.
+        XCTAssertEqual(failures.count, 0)
+    }
+
+    func testRollbackDecodeFailureIsAppendedToLastErrorAndRowMarkedDead() async throws {
+        // A row with a corrupt payload_json: decode succeeds for a
+        // best-effort dispatch path? No — dispatch will throw
+        // `payloadDecodeFailed`. That goes through `handleFailure` and
+        // the rollback re-decodes the same garbage. The rollback's
+        // decode error must be appended to `last_error` rather than
+        // silently swallowed.
+        let (db, client) = try makeFixture(threadLabels: ["INBOX", "UNREAD"])
+        // Insert a row with malformed JSON. `markRead` rollback would
+        // re-add UNREAD if it could decode; since it can't, UNREAD stays
+        // (the thread was never optimistically modified at this layer
+        // anyway — we just need to assert the error string).
+        let id = try insertMutation(db, kind: .markRead, payloadJson: "not-json{")
+
+        // dispatch will throw DrainError.payloadDecodeFailed before any
+        // network call; no stub needed beyond a defensive guard.
+        StubURLProtocol.handler = { _ in
+            XCTFail("no Gmail request should be issued for a malformed payload")
+            return (HTTPURLResponse(url: URL(string: "https://x")!, statusCode: 500, httpVersion: nil, headerFields: nil)!, Data())
+        }
+
+        let failures = FailureLog()
+        let drain = MutationDrain(db: db.queue, client: client, sleeper: { _ in })
+        await drain.setOnPermanentFailure { mid, err in
+            failures.record(id: mid, error: err)
+        }
+        await drain.runOnce()
+
+        XCTAssertEqual(try pendingCount(db), 1, "row is retained on permanent failure")
+        let row = try XCTUnwrap(try fetchMutation(db, id: id))
+        let lastError = try XCTUnwrap(row.lastError)
+        XCTAssertTrue(lastError.contains("payloadDecodeFailed"),
+                      "primary error must be in last_error: got \(lastError)")
+        XCTAssertTrue(lastError.contains("rollback failed:"),
+                      "rollback decode failure must be appended: got \(lastError)")
+        XCTAssertEqual(failures.count, 1, "permanent-failure handler still fires")
     }
 
     // MARK: - ordering

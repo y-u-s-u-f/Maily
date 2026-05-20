@@ -139,7 +139,15 @@ public actor MutationDrain {
     }
 
     private func process(_ mutation: PendingMutation) async -> Outcome {
-        guard let id = mutation.id else { return .succeeded }
+        guard let id = mutation.id else {
+            // A row fetched from GRDB always has an `id`. Reaching this
+            // branch indicates a programmer error (e.g. a hand-built
+            // `PendingMutation` instance passed to `process`). Fail loudly
+            // in debug, fail permanently in production — the safer
+            // direction than silently succeeding without making the call.
+            assertionFailure("process(_:) called with mutation.id == nil")
+            return .permanentlyFailed
+        }
 
         // Decode + dispatch.
         do {
@@ -221,9 +229,16 @@ public actor MutationDrain {
     // MARK: - failure handling
 
     private func handleFailure(_ mutation: PendingMutation, id: MutationID, error: Error) async -> Outcome {
-        // needsReauth is a session-wide condition: every subsequent call
-        // would also fail. Stop the pass without mutating the row.
-        if let sessionError = error as? AuthenticatedSessionError, sessionError == .needsReauth {
+        // Session-wide conditions where every subsequent call in this
+        // pass would also fail. Stop the pass without mutating the row,
+        // without rolling back, and without firing the delegate.
+        // - `.needsReauth`: refresh token is dead; UI re-runs OAuth.
+        // - `.missingRefreshToken`: no refresh token persisted at all —
+        //   a config-level issue, not a per-row failure. Bumping
+        //   attempts on every row until they all die permanent would
+        //   be actively harmful.
+        if let sessionError = error as? AuthenticatedSessionError,
+           sessionError == .needsReauth || sessionError == .missingRefreshToken {
             return .needsReauth
         }
 
@@ -251,14 +266,31 @@ public actor MutationDrain {
         // "dead" record (last_error IS NOT NULL) so subsequent passes
         // skip it; the row stays around for diagnostics and any future
         // user-facing "show failed mutations" surface.
-        let errorString = String(describing: error)
+        //
+        // A rollback decode failure (the payload was decodable enough to
+        // dispatch but somehow not now — shouldn't happen, but the row
+        // still has to be marked dead) is surfaced loudly in
+        // `last_error` rather than silently swallowed. We MUST NOT bail
+        // out of the write because that would leave the row pending and
+        // re-dispatch it next pass.
+        let baseErrorString = String(describing: error)
         do {
             try await db.write { db in
+                let rollbackError: Error?
+                do {
+                    try Self.rollback(for: mutation, db: db)
+                    rollbackError = nil
+                } catch {
+                    rollbackError = error
+                }
+                let errorString: String = {
+                    guard let rollbackError else { return baseErrorString }
+                    return "\(baseErrorString); rollback failed: \(rollbackError)"
+                }()
                 try db.execute(
                     sql: "UPDATE pending_mutations SET last_error = ?, attempts = ? WHERE id = ?",
                     arguments: [errorString, nextAttempts, id]
                 )
-                try Self.rollback(for: mutation, db: db)
             }
         } catch {
             // Rollback or persist failed; bail without notifying so we can
@@ -277,9 +309,13 @@ public actor MutationDrain {
     /// row. `send` is a no-op — there is no enqueued local `Message` row
     /// yet at this layer of the build, so there is nothing to undo.
     static func rollback(for mutation: PendingMutation, db: Database) throws {
+        // Decode errors propagate to the caller, which appends them to
+        // `last_error` rather than silently dropping the optimistic
+        // change. The payload was decodable enough at dispatch time, so
+        // a failure here is a real bug worth surfacing.
         switch mutation.kind {
         case .modifyLabels:
-            guard let payload = try? MutationPayload.decode(MutationPayload.ModifyLabels.self, from: mutation.payloadJson) else { return }
+            let payload = try MutationPayload.decode(MutationPayload.ModifyLabels.self, from: mutation.payloadJson)
             try applyLabelRollback(
                 threadId: payload.threadId,
                 undoAdds: payload.addLabelIds,
@@ -287,13 +323,13 @@ public actor MutationDrain {
                 db: db
             )
         case .trash:
-            guard let payload = try? MutationPayload.decode(MutationPayload.ThreadOnly.self, from: mutation.payloadJson) else { return }
+            let payload = try MutationPayload.decode(MutationPayload.ThreadOnly.self, from: mutation.payloadJson)
             try applyLabelRollback(threadId: payload.threadId, undoAdds: ["TRASH"], undoRemoves: [], db: db)
         case .untrash:
-            guard let payload = try? MutationPayload.decode(MutationPayload.ThreadOnly.self, from: mutation.payloadJson) else { return }
+            let payload = try MutationPayload.decode(MutationPayload.ThreadOnly.self, from: mutation.payloadJson)
             try applyLabelRollback(threadId: payload.threadId, undoAdds: [], undoRemoves: ["TRASH"], db: db)
         case .markRead:
-            guard let payload = try? MutationPayload.decode(MutationPayload.ThreadOnly.self, from: mutation.payloadJson) else { return }
+            let payload = try MutationPayload.decode(MutationPayload.ThreadOnly.self, from: mutation.payloadJson)
             try applyLabelRollback(threadId: payload.threadId, undoAdds: [], undoRemoves: ["UNREAD"], db: db)
         case .send:
             // No local optimistic Message row enqueued yet — nothing to undo.
@@ -334,7 +370,15 @@ public actor MutationDrain {
             switch sessionError {
             case .http(let status, _):
                 return status == 429 || (500...599).contains(status)
-            default:
+            case .invalidResponse:
+                // Non-`HTTPURLResponse` from URLSession — a transport /
+                // parse glitch. Almost always transient (proxy hiccup,
+                // truncated body); same outer-retry path as 5xx/429.
+                return true
+            case .needsReauth, .missingRefreshToken:
+                // Session-wide; handled by the caller before we get
+                // here. If for some reason we did, treat as not
+                // retryable per-row.
                 return false
             }
         }
