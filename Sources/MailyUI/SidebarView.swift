@@ -26,21 +26,17 @@ public struct SidebarView: View {
     ]
 
     public var body: some View {
-        List(SidebarItem.allCases, id: \.self, selection: $selection) { item in
-            Label(item.rawValue, systemImage: Self.systemImageNames[item] ?? "folder")
-                .accessibilityIdentifier("sidebar-\(item.rawValue.lowercased())")
+        List(selection: $selection) {
+            Section {
+                ForEach(SidebarItem.allCases, id: \.self) { item in
+                    Label(item.rawValue, systemImage: Self.systemImageNames[item] ?? "folder")
+                        .accessibilityIdentifier("sidebar-\(item.rawValue.lowercased())")
+                }
+            }
+            // Labels section header — empty for now
+            Section("Labels") { }
         }
         .accessibilityIdentifier("SidebarList")
-        // Labels section header — empty for now
-        .safeAreaInset(edge: .bottom) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Labels")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 6)
-            }
-        }
         .listStyle(.sidebar)
     }
 }

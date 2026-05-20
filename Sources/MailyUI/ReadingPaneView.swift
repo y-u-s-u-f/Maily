@@ -22,6 +22,7 @@ public struct ReadingPaneView: View {
 
                     VStack(alignment: .leading, spacing: 6) {
                         headerRow(label: "From", value: thread.sender)
+                        headerRow(label: "To",   value: thread.to)
                         headerRow(label: "Date",  value: thread.timestamp)
                     }
                     .font(.callout)

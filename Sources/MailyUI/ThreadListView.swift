@@ -6,13 +6,15 @@ import AppKit
 public struct ThreadRow: Identifiable, Sendable {
     public let id: String
     public let sender: String
+    public let to: String
     public let subject: String
     public let snippet: String
     public let timestamp: String
 
-    public init(id: String, sender: String, subject: String, snippet: String, timestamp: String) {
+    public init(id: String, sender: String, to: String, subject: String, snippet: String, timestamp: String) {
         self.id = id
         self.sender = sender
+        self.to = to
         self.subject = subject
         self.snippet = snippet
         self.timestamp = timestamp
@@ -25,6 +27,7 @@ public struct ThreadRow: Identifiable, Sendable {
     ThreadRow(
         id: "t1",
         sender: "GitHub",
+        to: "yusuf@maily.app",
         subject: "Your pull request was merged",
         snippet: "PR #42 'feat: add mail window scaffold' was merged into main.",
         timestamp: "9:14 AM"
@@ -32,6 +35,7 @@ public struct ThreadRow: Identifiable, Sendable {
     ThreadRow(
         id: "t2",
         sender: "App Store Connect",
+        to: "yusuf@maily.app",
         subject: "Weekly summary for Maily",
         snippet: "Crash-free rate: 99.8 %. 12 new downloads this week.",
         timestamp: "Yesterday"
@@ -39,6 +43,7 @@ public struct ThreadRow: Identifiable, Sendable {
     ThreadRow(
         id: "t3",
         sender: "stripe-receipts@stripe.com",
+        to: "yusuf@maily.app",
         subject: "Your receipt from Stripe",
         snippet: "You were charged $9.00 on May 19, 2026 for Maily Developer Plan.",
         timestamp: "Mon"
@@ -46,6 +51,7 @@ public struct ThreadRow: Identifiable, Sendable {
     ThreadRow(
         id: "t4",
         sender: "mom@example.com",
+        to: "yusuf@maily.app",
         subject: "Dinner this Friday?",
         snippet: "Hey, are you free Friday evening? Dad wants to try that new place downtown.",
         timestamp: "Sun"
@@ -53,6 +59,7 @@ public struct ThreadRow: Identifiable, Sendable {
     ThreadRow(
         id: "t5",
         sender: "noreply@notion.so",
+        to: "yusuf@maily.app",
         subject: "[Notion] Someone mentioned you",
         snippet: "Yusuf mentioned you in the page \"Maily roadmap\": @you check this out.",
         timestamp: "Sat"
@@ -60,6 +67,7 @@ public struct ThreadRow: Identifiable, Sendable {
     ThreadRow(
         id: "t6",
         sender: "team@linear.app",
+        to: "yusuf@maily.app",
         subject: "Issue assigned: M4-α MailWindow scaffold",
         snippet: "A new issue has been assigned to you in the Maily project.",
         timestamp: "Fri"
@@ -67,6 +75,7 @@ public struct ThreadRow: Identifiable, Sendable {
     ThreadRow(
         id: "t7",
         sender: "alerts@cloudflare.com",
+        to: "yusuf@maily.app",
         subject: "DNS record updated for maily.app",
         snippet: "A DNS record was updated on your account. If this was not you, contact support.",
         timestamp: "Thu"

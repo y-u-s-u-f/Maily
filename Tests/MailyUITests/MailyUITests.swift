@@ -24,6 +24,7 @@ final class SampleThreadDataTests: XCTestCase {
         for thread in sampleThreads {
             XCTAssertFalse(thread.id.isEmpty,        "Thread id must not be empty: \(thread)")
             XCTAssertFalse(thread.sender.isEmpty,    "Thread sender must not be empty: \(thread)")
+            XCTAssertFalse(thread.to.isEmpty,        "Thread to must not be empty: \(thread)")
             XCTAssertFalse(thread.subject.isEmpty,   "Thread subject must not be empty: \(thread)")
             XCTAssertFalse(thread.snippet.isEmpty,   "Thread snippet must not be empty: \(thread)")
             XCTAssertFalse(thread.timestamp.isEmpty, "Thread timestamp must not be empty: \(thread)")
@@ -62,20 +63,22 @@ final class ThreadRowTests: XCTestCase {
         let row = ThreadRow(
             id: "x1",
             sender: "Alice",
+            to: "bob@example.com",
             subject: "Hello",
             snippet: "Hello there",
             timestamp: "10:00 AM"
         )
         XCTAssertEqual(row.id, "x1")
         XCTAssertEqual(row.sender, "Alice")
+        XCTAssertEqual(row.to, "bob@example.com")
         XCTAssertEqual(row.subject, "Hello")
         XCTAssertEqual(row.snippet, "Hello there")
         XCTAssertEqual(row.timestamp, "10:00 AM")
     }
 
     func testThreadRowIdentifiableByID() {
-        let row1 = ThreadRow(id: "a", sender: "A", subject: "A", snippet: "A", timestamp: "A")
-        let row2 = ThreadRow(id: "b", sender: "B", subject: "B", snippet: "B", timestamp: "B")
+        let row1 = ThreadRow(id: "a", sender: "A", to: "a@example.com", subject: "A", snippet: "A", timestamp: "A")
+        let row2 = ThreadRow(id: "b", sender: "B", to: "b@example.com", subject: "B", snippet: "B", timestamp: "B")
         XCTAssertNotEqual(row1.id, row2.id)
     }
 }
