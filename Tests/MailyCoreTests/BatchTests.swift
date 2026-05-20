@@ -9,29 +9,7 @@ final class BatchTests: XCTestCase {
     }
 
     private func tokenResponse(_ req: URLRequest) -> (HTTPURLResponse, Data)? {
-        guard req.url?.host == "oauth2.googleapis.com" else { return nil }
-        let body = Data(#"{"access_token":"at","expires_in":3600,"scope":"s","token_type":"Bearer"}"#.utf8)
-        return (HTTPURLResponse(url: req.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, body)
-    }
-
-    /// Build a multipart/mixed response body with the given embedded HTTP
-    /// responses, in the same shape Gmail returns for `/batch/gmail/v1`.
-    private func makeBatchResponseBody(boundary: String, parts: [(status: Int, reason: String, headers: [(String, String)], body: String)]) -> Data {
-        var out = ""
-        for part in parts {
-            out += "--\(boundary)\r\n"
-            out += "Content-Type: application/http\r\n"
-            out += "\r\n"
-            out += "HTTP/1.1 \(part.status) \(part.reason)\r\n"
-            for (k, v) in part.headers {
-                out += "\(k): \(v)\r\n"
-            }
-            out += "\r\n"
-            out += part.body
-            out += "\r\n"
-        }
-        out += "--\(boundary)--\r\n"
-        return Data(out.utf8)
+        tokenStubResponse(for: req)
     }
 
     // MARK: - request encoding
@@ -62,7 +40,7 @@ final class BatchTests: XCTestCase {
             XCTAssertTrue(bodyString.contains("GET /gmail/v1/users/me/messages/b?format=metadata HTTP/1.1\r\n"))
             XCTAssertTrue(bodyString.contains("GET /gmail/v1/users/me/messages/c?format=metadata HTTP/1.1\r\n"))
 
-            let respBody = self.makeBatchResponseBody(boundary: responseBoundary, parts: [
+            let respBody = makeBatchResponseBody(boundary: responseBoundary, parts: [
                 (200, "OK", [("Content-Type", "application/json")], #"{"id":"a"}"#),
                 (200, "OK", [("Content-Type", "application/json")], #"{"id":"b"}"#),
                 (200, "OK", [("Content-Type", "application/json")], #"{"id":"c"}"#),
@@ -117,7 +95,7 @@ final class BatchTests: XCTestCase {
             // Closing delimiter present.
             XCTAssertTrue(bodyString.hasSuffix("--\(reqBoundary)--\r\n"))
 
-            let respBody = self.makeBatchResponseBody(boundary: responseBoundary, parts: [
+            let respBody = makeBatchResponseBody(boundary: responseBoundary, parts: [
                 (200, "OK", [("Content-Type", "application/json")], #"{"id":"m1"}"#),
                 (200, "OK", [("Content-Type", "application/json")], #"{"id":"t1"}"#),
             ])
@@ -150,7 +128,7 @@ final class BatchTests: XCTestCase {
         let responseBoundary = "rb-order"
         StubURLProtocol.handler = { req in
             if let t = self.tokenResponse(req) { return t }
-            let respBody = self.makeBatchResponseBody(boundary: responseBoundary, parts: [
+            let respBody = makeBatchResponseBody(boundary: responseBoundary, parts: [
                 (200, "OK", [], "first"),
                 (200, "OK", [], "second"),
                 (200, "OK", [], "third"),
@@ -176,7 +154,7 @@ final class BatchTests: XCTestCase {
         let responseBoundary = "rb-mixed-status"
         StubURLProtocol.handler = { req in
             if let t = self.tokenResponse(req) { return t }
-            let respBody = self.makeBatchResponseBody(boundary: responseBoundary, parts: [
+            let respBody = makeBatchResponseBody(boundary: responseBoundary, parts: [
                 (200, "OK", [("Content-Type", "application/json")], #"{"id":"ok"}"#),
                 (404, "Not Found", [("Content-Type", "application/json")], #"{"error":"missing"}"#),
             ])
@@ -248,7 +226,7 @@ final class BatchTests: XCTestCase {
         let collidingBody = "prefix --\(responseBoundary) suffix \(responseBoundary)"
         StubURLProtocol.handler = { req in
             if let t = self.tokenResponse(req) { return t }
-            let respBody = self.makeBatchResponseBody(boundary: responseBoundary, parts: [
+            let respBody = makeBatchResponseBody(boundary: responseBoundary, parts: [
                 (200, "OK", [("Content-Type", "text/plain")], collidingBody),
                 (200, "OK", [("Content-Type", "application/json")], #"{"id":"b"}"#),
             ])
@@ -277,7 +255,7 @@ final class BatchTests: XCTestCase {
         let responseBoundary = "abc"
         StubURLProtocol.handler = { req in
             if let t = self.tokenResponse(req) { return t }
-            let respBody = self.makeBatchResponseBody(boundary: responseBoundary, parts: [
+            let respBody = makeBatchResponseBody(boundary: responseBoundary, parts: [
                 (200, "OK", [("Content-Type", "application/json")], #"{"id":"q"}"#),
             ])
             let resp = HTTPURLResponse(
@@ -302,7 +280,7 @@ final class BatchTests: XCTestCase {
         StubURLProtocol.handler = { req in
             if let t = self.tokenResponse(req) { return t }
             // Two requests, but only one response part.
-            let respBody = self.makeBatchResponseBody(boundary: responseBoundary, parts: [
+            let respBody = makeBatchResponseBody(boundary: responseBoundary, parts: [
                 (200, "OK", [], "only one"),
             ])
             let resp = HTTPURLResponse(
