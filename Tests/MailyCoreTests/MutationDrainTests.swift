@@ -203,7 +203,63 @@ final class MutationDrainTests: XCTestCase {
         XCTAssertNil(row.lastError, "lastError is only set on permanent failure")
     }
 
-    func testRunOnceAfterMaxAttemptsDeletesRowAndRollsBackAndFiresHandler() async throws {
+    func testRunOnceContinuesPastRetryableFailureToDrainSubsequentRows() async throws {
+        // Queue: [failingRow, goodRow1, goodRow2]. After failingRow hits a 5xx,
+        // the same runOnce() pass must still drain goodRow1 and goodRow2.
+        let (db, client) = try makeFixture()
+        try await db.queue.write { dbConn in
+            try MailThread(id: "t-good1", accountId: "acct", labelIds: []).insert(dbConn)
+            try MailThread(id: "t-good2", accountId: "acct", labelIds: []).insert(dbConn)
+        }
+        let failingId = try insertMutation(
+            db,
+            kind: .markRead,
+            payloadJson: try MutationPayload.encode(MutationPayload.ThreadOnly(threadId: "t-fail")),
+            createdAt: Date(timeIntervalSince1970: 1_000)
+        )
+        let good1Id = try insertMutation(
+            db,
+            kind: .markRead,
+            payloadJson: try MutationPayload.encode(MutationPayload.ThreadOnly(threadId: "t-good1")),
+            createdAt: Date(timeIntervalSince1970: 2_000)
+        )
+        let good2Id = try insertMutation(
+            db,
+            kind: .markRead,
+            payloadJson: try MutationPayload.encode(MutationPayload.ThreadOnly(threadId: "t-good2")),
+            createdAt: Date(timeIntervalSince1970: 3_000)
+        )
+
+        let paths = PathLog()
+        StubURLProtocol.handler = { req in
+            if let t = self.tokenStub(req) { return t }
+            let url = req.url?.absoluteString ?? ""
+            paths.append(url)
+            if url.contains("/threads/t-fail/modify") {
+                return (HTTPURLResponse(url: req.url!, statusCode: 503, httpVersion: nil, headerFields: nil)!,
+                        Data("oops".utf8))
+            }
+            return (HTTPURLResponse(url: req.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!,
+                    Data(#"{"id":"x"}"#.utf8))
+        }
+
+        let drain = MutationDrain(db: db.queue, client: client, sleeper: { _ in })
+        await drain.runOnce()
+
+        // Failing row stays with bumped attempts; good rows are gone.
+        XCTAssertEqual(try pendingCount(db), 1)
+        let row = try XCTUnwrap(try fetchMutation(db, id: failingId))
+        XCTAssertEqual(row.attempts, 1)
+        XCTAssertNil(row.lastError)
+        XCTAssertNil(try fetchMutation(db, id: good1Id))
+        XCTAssertNil(try fetchMutation(db, id: good2Id))
+        // All three Gmail calls were attempted in order.
+        XCTAssertTrue(paths.values.contains("https://gmail.googleapis.com/gmail/v1/users/me/threads/t-fail/modify"))
+        XCTAssertTrue(paths.values.contains("https://gmail.googleapis.com/gmail/v1/users/me/threads/t-good1/modify"))
+        XCTAssertTrue(paths.values.contains("https://gmail.googleapis.com/gmail/v1/users/me/threads/t-good2/modify"))
+    }
+
+    func testRunOnceAfterMaxAttemptsRetainsDeadRowAndRollsBackAndFiresHandler() async throws {
         // optimistic change: removed UNREAD locally. rollback must re-add UNREAD.
         let (db, client) = try makeFixture(threadLabels: ["INBOX"])
         let payload = try MutationPayload.encode(MutationPayload.ThreadOnly(threadId: "t1"))
@@ -223,8 +279,11 @@ final class MutationDrainTests: XCTestCase {
         }
         await drain.runOnce()
 
-        XCTAssertEqual(try pendingCount(db), 0, "row is deleted on permanent failure")
-        XCTAssertNil(try fetchMutation(db, id: id))
+        // Row is retained (not deleted) with attempts >= maxAttempts and a non-nil last_error.
+        XCTAssertEqual(try pendingCount(db), 1, "row is retained on permanent failure")
+        let row = try XCTUnwrap(try fetchMutation(db, id: id))
+        XCTAssertGreaterThanOrEqual(row.attempts, 5)
+        XCTAssertNotNil(row.lastError, "lastError must be persisted on permanent failure")
         XCTAssertEqual(failures.count, 1)
         XCTAssertEqual(failures.firstID, id)
 
@@ -232,9 +291,21 @@ final class MutationDrainTests: XCTestCase {
         let thread = try XCTUnwrap(fetched)
         // Optimistically removed UNREAD; rollback re-adds it.
         XCTAssertTrue(thread.labelIds.contains("UNREAD"), "rollback should re-add UNREAD")
+
+        // A subsequent runOnce must NOT retry the dead row.
+        let pathsAfter = PathLog()
+        StubURLProtocol.handler = { req in
+            if let t = self.tokenStub(req) { return t }
+            pathsAfter.append(req.url?.absoluteString ?? "")
+            return (HTTPURLResponse(url: req.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!,
+                    Data(#"{"id":"x"}"#.utf8))
+        }
+        await drain.runOnce()
+        XCTAssertTrue(pathsAfter.values.isEmpty, "dead row must not be retried on subsequent passes")
+        XCTAssertEqual(failures.count, 1, "permanent failure handler must not fire twice for the same row")
     }
 
-    func testRunOnceOnNonRetryable4xxFiresPermanentFailureAndRollsBack() async throws {
+    func testRunOnceOnNonRetryable4xxRetainsRowFiresPermanentFailureAndRollsBack() async throws {
         // optimistic change: added STARRED. rollback must remove STARRED.
         let (db, client) = try makeFixture(threadLabels: ["INBOX", "STARRED"])
         let payload = try MutationPayload.encode(MutationPayload.ModifyLabels(
@@ -255,13 +326,80 @@ final class MutationDrainTests: XCTestCase {
         }
         await drain.runOnce()
 
-        XCTAssertEqual(try pendingCount(db), 0)
+        XCTAssertEqual(try pendingCount(db), 1, "row is retained on non-retryable 4xx")
+        let row = try XCTUnwrap(try fetchMutation(db, id: id))
+        XCTAssertGreaterThanOrEqual(row.attempts, 1)
+        let lastError = try XCTUnwrap(row.lastError)
+        XCTAssertTrue(lastError.contains("404"), "last_error should reflect the 4xx status: got \(lastError)")
         XCTAssertEqual(failures.count, 1)
         XCTAssertEqual(failures.firstID, id)
 
         let fetched = try await db.queue.read { try MailThread.fetchOne($0, key: "t1") }
         let thread = try XCTUnwrap(fetched)
         XCTAssertFalse(thread.labelIds.contains("STARRED"), "rollback should remove the optimistically-added STARRED")
+
+        // Dead row is not retried on a second pass.
+        let pathsAfter = PathLog()
+        StubURLProtocol.handler = { req in
+            if let t = self.tokenStub(req) { return t }
+            pathsAfter.append(req.url?.absoluteString ?? "")
+            return (HTTPURLResponse(url: req.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!,
+                    Data(#"{"id":"x"}"#.utf8))
+        }
+        await drain.runOnce()
+        XCTAssertTrue(pathsAfter.values.isEmpty, "dead row must not be retried on subsequent passes")
+    }
+
+    func testRunOnceOnNeedsReauthLeavesRowUntouchedAndStopsPass() async throws {
+        // Two rows queued. The first will trigger needsReauth via repeated 401s.
+        // Expected: pass stops, neither row is touched, no rollback, no perm-failure.
+        let (db, client) = try makeFixture(threadLabels: ["INBOX"])
+        try await db.queue.write { dbConn in
+            try MailThread(id: "t-other", accountId: "acct", labelIds: ["INBOX"]).insert(dbConn)
+        }
+        let firstId = try insertMutation(
+            db,
+            kind: .markRead,
+            payloadJson: try MutationPayload.encode(MutationPayload.ThreadOnly(threadId: "t1")),
+            createdAt: Date(timeIntervalSince1970: 1_000)
+        )
+        let secondId = try insertMutation(
+            db,
+            kind: .markRead,
+            payloadJson: try MutationPayload.encode(MutationPayload.ThreadOnly(threadId: "t-other")),
+            createdAt: Date(timeIntervalSince1970: 2_000)
+        )
+
+        // Every Gmail call returns 401 — AuthenticatedSession will refresh once,
+        // see another 401, and surface `.needsReauth`.
+        StubURLProtocol.handler = { req in
+            if let t = self.tokenStub(req) { return t }
+            return (HTTPURLResponse(url: req.url!, statusCode: 401, httpVersion: nil, headerFields: nil)!,
+                    Data("unauthorized".utf8))
+        }
+
+        let failures = FailureLog()
+        let drain = MutationDrain(db: db.queue, client: client, sleeper: { _ in })
+        await drain.setOnPermanentFailure { mid, err in
+            failures.record(id: mid, error: err)
+        }
+        await drain.runOnce()
+
+        // Both rows must be untouched (no attempts++, no last_error).
+        let first = try XCTUnwrap(try fetchMutation(db, id: firstId))
+        XCTAssertEqual(first.attempts, 0, "needsReauth must not bump attempts")
+        XCTAssertNil(first.lastError, "needsReauth must not write last_error")
+        let second = try XCTUnwrap(try fetchMutation(db, id: secondId))
+        XCTAssertEqual(second.attempts, 0)
+        XCTAssertNil(second.lastError)
+
+        // No rollback: the optimistic-removed UNREAD must not be re-added.
+        let t1 = try await db.queue.read { try MailThread.fetchOne($0, key: "t1") }
+        let thread = try XCTUnwrap(t1)
+        XCTAssertFalse(thread.labelIds.contains("UNREAD"), "needsReauth must not trigger rollback")
+
+        // No permanent-failure callbacks.
+        XCTAssertEqual(failures.count, 0)
     }
 
     // MARK: - ordering

@@ -10,21 +10,28 @@ import GRDB
 /// Failure handling:
 /// - Retryable HTTP failure (5xx / 429 — these surface from
 ///   `AuthenticatedSession` only after *its* internal retries are
-///   exhausted): increment `attempts`, leave the row in place. The OUTER
-///   retry happens on the next `runOnce` invocation; `start()` sleeps with
-///   exponential backoff between drains.
+///   exhausted): increment `attempts`, leave the row in place, and SKIP
+///   the row for the rest of this pass while continuing to drain newer
+///   rows. The OUTER retry happens on the next `runOnce` invocation;
+///   `start()` sleeps between drains.
+/// - `AuthenticatedSessionError.needsReauth`: stop the pass immediately
+///   without touching the row (no attempts++, no last_error, no rollback).
+///   The UI kicks off OAuth via `AuthenticatedSession.needsReauthFlag`;
+///   the next outer tick will drain normally.
 /// - Once `attempts >= maxAttempts` (default 5), or on any non-retryable
 ///   HTTP (4xx other than 429), treat it as permanent: record `last_error`,
-///   undo the optimistic local change in the same transaction, delete the
-///   row, and notify the `onPermanentFailure` delegate.
+///   undo the optimistic local change in the same transaction, retain the
+///   row (with `last_error` populated) as a terminal "dead" record, and
+///   notify the `onPermanentFailure` delegate. Subsequent passes skip dead
+///   rows via the `last_error IS NOT NULL` filter.
 ///
 /// Rollback of the optimistic local change happens in the same GRDB
-/// transaction as the row deletion so the database can never end up with
-/// "row gone, optimistic change still applied" (or the reverse). For
-/// label-shaped kinds (`modifyLabels`, `trash`, `untrash`, `markRead`) the
-/// rollback inverts the label set on the local `threads` row. For `send`
-/// there is no local optimistic state to roll back yet, so it's a no-op
-/// at this layer.
+/// transaction as the `last_error`/`attempts` update so the database can
+/// never end up with "row marked dead, optimistic change still applied"
+/// (or the reverse). For label-shaped kinds (`modifyLabels`, `trash`,
+/// `untrash`, `markRead`) the rollback inverts the label set on the local
+/// `threads` row. For `send` there is no local optimistic state to roll
+/// back yet, so it's a no-op at this layer.
 public actor MutationDrain {
 
     // MARK: - public types
@@ -45,7 +52,6 @@ public actor MutationDrain {
     private let client: GmailClient
     private let sleeper: @Sendable (TimeInterval) async -> Void
     private let maxAttempts: Int
-    private let baseBackoff: TimeInterval
     private let idleInterval: TimeInterval
 
     // MARK: - state
@@ -60,14 +66,12 @@ public actor MutationDrain {
         client: GmailClient,
         sleeper: @escaping @Sendable (TimeInterval) async -> Void,
         maxAttempts: Int = 5,
-        baseBackoff: TimeInterval = 0.5,
         idleInterval: TimeInterval = 5.0
     ) {
         self.db = db
         self.client = client
         self.sleeper = sleeper
         self.maxAttempts = maxAttempts
-        self.baseBackoff = baseBackoff
         self.idleInterval = idleInterval
     }
 
@@ -77,19 +81,31 @@ public actor MutationDrain {
 
     // MARK: - drain
 
-    /// Drain every currently pending row. Stops early if a row fails
-    /// retryably (its `attempts` is bumped and the loop yields so the
-    /// outer `start()` loop can apply exponential backoff before the next
-    /// drain).
+    /// Drain every currently pending row.
+    ///
+    /// A single pass walks the queue oldest-first. A retryable failure on
+    /// one row bumps its `attempts` and SKIPS it for the rest of this
+    /// pass, then continues with the next-oldest row — one transient
+    /// 429/5xx must not stall the entire queue until the next outer tick.
+    /// `AuthenticatedSessionError.needsReauth` ends the pass immediately
+    /// without touching the row; the next outer tick (after the user
+    /// re-auths) will pick it up. Dead rows (`last_error IS NOT NULL`)
+    /// are filtered out of the candidate set so they aren't re-attempted.
     public func runOnce() async {
+        var skipped: Set<MutationID> = []
         while true {
-            // Fetch the oldest row.
+            // Fetch the oldest still-pending row that isn't already dead
+            // and wasn't skipped earlier in this pass.
             let next: PendingMutation?
             do {
-                next = try await db.read { db in
-                    try PendingMutation
+                next = try await db.read { [skipped] db in
+                    var query = PendingMutation
+                        .filter(sql: "last_error IS NULL")
                         .order(Column("created_at").asc, Column("id").asc)
-                        .fetchOne(db)
+                    if !skipped.isEmpty {
+                        query = query.filter(!skipped.contains(Column("id")))
+                    }
+                    return try query.fetchOne(db)
                 }
             } catch {
                 // Reading the queue itself failed — give up this pass.
@@ -102,7 +118,14 @@ public actor MutationDrain {
             case .succeeded, .permanentlyFailed:
                 continue
             case .retryableFailed:
-                // Leave the row, exit the pass so start() can back off.
+                // Skip for the rest of this pass; the next outer tick
+                // will re-pick it up. Re-attempting mid-pass would be a
+                // tight loop and defeat the "outer backoff" contract.
+                if let id = mutation.id { skipped.insert(id) }
+                continue
+            case .needsReauth:
+                // Token is dead. Stop the pass entirely; the next outer
+                // tick (after the UI re-auths) will drain normally.
                 return
             }
         }
@@ -112,6 +135,7 @@ public actor MutationDrain {
         case succeeded
         case retryableFailed
         case permanentlyFailed
+        case needsReauth
     }
 
     private func process(_ mutation: PendingMutation) async -> Outcome {
@@ -197,6 +221,12 @@ public actor MutationDrain {
     // MARK: - failure handling
 
     private func handleFailure(_ mutation: PendingMutation, id: MutationID, error: Error) async -> Outcome {
+        // needsReauth is a session-wide condition: every subsequent call
+        // would also fail. Stop the pass without mutating the row.
+        if let sessionError = error as? AuthenticatedSessionError, sessionError == .needsReauth {
+            return .needsReauth
+        }
+
         let retryable = Self.isRetryable(error)
         let nextAttempts = mutation.attempts + 1
         let hitCap = nextAttempts >= maxAttempts
@@ -216,7 +246,11 @@ public actor MutationDrain {
             return .retryableFailed
         }
 
-        // Permanent: record error, roll back, delete — all in one tx.
+        // Permanent: record error and roll back the optimistic local
+        // change in the same transaction. Retain the row as a terminal
+        // "dead" record (last_error IS NOT NULL) so subsequent passes
+        // skip it; the row stays around for diagnostics and any future
+        // user-facing "show failed mutations" surface.
         let errorString = String(describing: error)
         do {
             try await db.write { db in
@@ -225,10 +259,9 @@ public actor MutationDrain {
                     arguments: [errorString, nextAttempts, id]
                 )
                 try Self.rollback(for: mutation, db: db)
-                try PendingMutation.deleteOne(db, key: id)
             }
         } catch {
-            // Rollback or delete failed; bail without notifying so we can
+            // Rollback or persist failed; bail without notifying so we can
             // try again next pass rather than dropping the failure on the
             // floor.
             return .retryableFailed
@@ -290,6 +323,13 @@ public actor MutationDrain {
     // MARK: - retryability
 
     static func isRetryable(_ error: Error) -> Bool {
+        // Anything outside AuthenticatedSessionError is treated as
+        // permanent: the session layer is the contract boundary for what
+        // surfaces from a Gmail call, so an unrecognized error type is a
+        // programmer error or a corrupted payload — neither benefits from
+        // outer retries. `.needsReauth` is handled separately by the
+        // caller (it stops the pass rather than counting as retryable or
+        // permanent for this row).
         if let sessionError = error as? AuthenticatedSessionError {
             switch sessionError {
             case .http(let status, _):
