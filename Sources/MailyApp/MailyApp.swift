@@ -63,6 +63,7 @@ struct MailyAppScene: App {
     private let threadRepo: ThreadRepository
     private let messageRepo: MessageRepository
     private let syncEngine: SyncEngine
+    private let notifier: MailNotifier
     @StateObject private var viewModel: InboxViewModel
 
     init() {
@@ -99,11 +100,21 @@ struct MailyAppScene: App {
         )
         self.syncEngine = engine
 
+        let notifier = MailNotifier(messageRepo: messageRepo, accountID: "local")
+        self.notifier = notifier
+
         self.threadRepo = threadRepo
         self.messageRepo = messageRepo
         _viewModel = StateObject(wrappedValue: InboxViewModel(repository: threadRepo, accountID: "local"))
 
         Task.detached { await engine.startSync() }
+        // engine + notifier kick off in parallel; both are best-effort at launch.
+        // MailNotifier.start() is @MainActor-isolated, so the `await` from
+        // this nonisolated detached task hops to the main actor automatically.
+        // The explicit `@MainActor in` closure annotation hits a Swift 6.3
+        // region-based isolation checker bug when capturing a @MainActor
+        // reference from a @MainActor init, so it is omitted here.
+        Task.detached { await notifier.start() }
     }
 
     var body: some Scene {
