@@ -20,28 +20,23 @@ final class MetadataBatchSyncerTests: XCTestCase {
     // MARK: - Helpers
 
     private func tokenResponse(_ req: URLRequest) -> (HTTPURLResponse, Data)? {
-        guard req.url?.host == "oauth2.googleapis.com" else { return nil }
-        let body = Data(#"{"access_token":"at","expires_in":3600,"scope":"s","token_type":"Bearer"}"#.utf8)
-        return (HTTPURLResponse(url: req.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, body)
+        tokenStubResponse(for: req)
     }
 
-    /// Build a multipart/mixed response body matching Gmail's `/batch/gmail/v1` shape.
-    private func makeBatchResponseBody(boundary: String, parts: [(status: Int, reason: String, headers: [(String, String)], body: String)]) -> Data {
-        var out = ""
-        for part in parts {
-            out += "--\(boundary)\r\n"
-            out += "Content-Type: application/http\r\n"
-            out += "\r\n"
-            out += "HTTP/1.1 \(part.status) \(part.reason)\r\n"
-            for (k, v) in part.headers {
-                out += "\(k): \(v)\r\n"
+    /// Extract message ids from a batch request body by scanning for
+    /// `GET /gmail/v1/users/me/messages/<id>` lines. Used in tests that
+    /// need to mirror request ids back into responses.
+    private static func extractMessageIDs(fromBatchRequestBody body: Data) -> [String] {
+        let getPrefix = "GET /gmail/v1/users/me/messages/"
+        let bodyStr = String(data: body, encoding: .utf8) ?? ""
+        var ids: [String] = []
+        for line in bodyStr.components(separatedBy: "\r\n") where line.hasPrefix(getPrefix) {
+            let rest = line.dropFirst(getPrefix.count)
+            if let qIdx = rest.firstIndex(of: "?") {
+                ids.append(String(rest[..<qIdx]))
             }
-            out += "\r\n"
-            out += part.body
-            out += "\r\n"
         }
-        out += "--\(boundary)--\r\n"
-        return Data(out.utf8)
+        return ids
     }
 
     /// JSON for one GmailMessage suitable for an embedded subresponse body.
@@ -84,7 +79,7 @@ final class MetadataBatchSyncerTests: XCTestCase {
                 (200, "OK", [("Content-Type", "application/json")],
                  self.gmailMessageJSON(id: "m3", threadId: "t2", snippet: "s3", labelIds: ["INBOX"], internalDate: "1700000002000")),
             ]
-            let body = self.makeBatchResponseBody(boundary: respBoundary, parts: parts)
+            let body = makeBatchResponseBody(boundary: respBoundary, parts: parts)
             let resp = HTTPURLResponse(
                 url: req.url!, statusCode: 200, httpVersion: nil,
                 headerFields: ["Content-Type": "multipart/mixed; boundary=\(respBoundary)"]
@@ -117,38 +112,21 @@ final class MetadataBatchSyncerTests: XCTestCase {
         XCTAssertEqual(counts.values, [3])
     }
 
-    // MARK: - Test 2: 101 messages → 2 HTTP calls
+    // MARK: - Test 2: 101 messages → 2 HTTP calls (100 + 1)
 
     func testTwoChunksProduceTwoBatchHTTPCalls() async throws {
         let respBoundary = "rb2"
         StubURLProtocol.handler = { [self] req in
             if let t = self.tokenResponse(req) { return t }
-            // Parse boundary from request to know how many subrequests there are.
-            // We just need to return one subresponse per request. Decode body to count parts.
-            let bodyStr = String(data: req.httpBody ?? Data(), encoding: .utf8) ?? ""
-            let reqCT = req.value(forHTTPHeaderField: "Content-Type") ?? ""
-            let reqBoundary = String(reqCT.dropFirst("multipart/mixed; boundary=".count))
-            // Count opening delimiters (one per subrequest).
-            let n = bodyStr.components(separatedBy: "--\(reqBoundary)\r\n").count - 1
-
             // Extract message ids from the request paths to keep responses aligned.
-            // Path lines look like: GET /gmail/v1/users/me/messages/<id>?format=metadata...
-            var ids: [String] = []
-            let lines = bodyStr.components(separatedBy: "\r\n")
-            for line in lines where line.hasPrefix("GET /gmail/v1/users/me/messages/") {
-                let rest = line.dropFirst("GET /gmail/v1/users/me/messages/".count)
-                if let qIdx = rest.firstIndex(of: "?") {
-                    ids.append(String(rest[..<qIdx]))
-                }
-            }
-            XCTAssertEqual(ids.count, n)
+            let ids = Self.extractMessageIDs(fromBatchRequestBody: req.httpBody ?? Data())
 
             let parts: [(Int, String, [(String, String)], String)] = ids.map { id in
                 (200, "OK", [("Content-Type", "application/json")],
                  self.gmailMessageJSON(id: id, threadId: "t-\(id)", snippet: "s-\(id)",
                                         labelIds: ["INBOX"], internalDate: "1700000000000"))
             }
-            let body = self.makeBatchResponseBody(boundary: respBoundary, parts: parts)
+            let body = makeBatchResponseBody(boundary: respBoundary, parts: parts)
             let resp = HTTPURLResponse(
                 url: req.url!, statusCode: 200, httpVersion: nil,
                 headerFields: ["Content-Type": "multipart/mixed; boundary=\(respBoundary)"]
@@ -165,10 +143,19 @@ final class MetadataBatchSyncerTests: XCTestCase {
         let refs = (0..<101).map { MessageRef(id: "m\($0)", threadId: "t-m\($0)") }
         try await syncer.sync(refs)
 
-        let batchCalls = StubURLProtocol.capturedRequests.filter {
+        let batchRequests = StubURLProtocol.capturedRequests.filter {
             $0.url?.absoluteString.contains("/batch/gmail/v1") == true
-        }.count
-        XCTAssertEqual(batchCalls, 2)
+        }
+        XCTAssertEqual(batchRequests.count, 2)
+
+        // Per-call chunk sizes: 100, then 1. A buggy [51, 50] split would fail here.
+        let subrequestCounts: [Int] = batchRequests.map { req in
+            let ct = req.value(forHTTPHeaderField: "Content-Type") ?? ""
+            let reqBoundary = String(ct.dropFirst("multipart/mixed; boundary=".count))
+            let bodyStr = String(data: req.httpBody ?? Data(), encoding: .utf8) ?? ""
+            return bodyStr.components(separatedBy: "--\(reqBoundary)\r\n").count - 1
+        }
+        XCTAssertEqual(subrequestCounts, [100, 1])
 
         let messageCount = try await db.queue.read { try Message.fetchCount($0) }
         XCTAssertEqual(messageCount, 101)
@@ -181,18 +168,7 @@ final class MetadataBatchSyncerTests: XCTestCase {
         let callCounter = Counter()
         StubURLProtocol.handler = { [self] req in
             if let t = self.tokenResponse(req) { return t }
-            let bodyStr = String(data: req.httpBody ?? Data(), encoding: .utf8) ?? ""
-            let reqCT = req.value(forHTTPHeaderField: "Content-Type") ?? ""
-            let reqBoundary = String(reqCT.dropFirst("multipart/mixed; boundary=".count))
-
-            // Extract ids from paths.
-            var ids: [String] = []
-            for line in bodyStr.components(separatedBy: "\r\n") where line.hasPrefix("GET /gmail/v1/users/me/messages/") {
-                let rest = line.dropFirst("GET /gmail/v1/users/me/messages/".count)
-                if let qIdx = rest.firstIndex(of: "?") {
-                    ids.append(String(rest[..<qIdx]))
-                }
-            }
+            let ids = Self.extractMessageIDs(fromBatchRequestBody: req.httpBody ?? Data())
 
             let callIndex = callCounter.values.count
             callCounter.append(callIndex)
@@ -205,8 +181,7 @@ final class MetadataBatchSyncerTests: XCTestCase {
                                         labelIds: ["INBOX"], internalDate: "1700000000000",
                                         headers: [("From", fromValue)]))
             }
-            _ = reqBoundary
-            let body = self.makeBatchResponseBody(boundary: respBoundary, parts: parts)
+            let body = makeBatchResponseBody(boundary: respBoundary, parts: parts)
             let resp = HTTPURLResponse(
                 url: req.url!, statusCode: 200, httpVersion: nil,
                 headerFields: ["Content-Type": "multipart/mixed; boundary=\(respBoundary)"]
@@ -254,7 +229,7 @@ final class MetadataBatchSyncerTests: XCTestCase {
                  self.gmailMessageJSON(id: "ok2", threadId: "tk2", snippet: "s2",
                                         labelIds: ["INBOX"], internalDate: "1700000002000")),
             ]
-            let body = self.makeBatchResponseBody(boundary: respBoundary, parts: parts)
+            let body = makeBatchResponseBody(boundary: respBoundary, parts: parts)
             let resp = HTTPURLResponse(
                 url: req.url!, statusCode: 200, httpVersion: nil,
                 headerFields: ["Content-Type": "multipart/mixed; boundary=\(respBoundary)"]
@@ -302,7 +277,7 @@ final class MetadataBatchSyncerTests: XCTestCase {
                     ]
                  ))
             ]
-            let body = self.makeBatchResponseBody(boundary: respBoundary, parts: parts)
+            let body = makeBatchResponseBody(boundary: respBoundary, parts: parts)
             let resp = HTTPURLResponse(
                 url: req.url!, statusCode: 200, httpVersion: nil,
                 headerFields: ["Content-Type": "multipart/mixed; boundary=\(respBoundary)"]
@@ -322,5 +297,57 @@ final class MetadataBatchSyncerTests: XCTestCase {
         XCTAssertEqual(row?.fromAddr, "alice@example.com")
         XCTAssertEqual(row?.subject, "Hello world")
         XCTAssertEqual(row?.toAddrs, ["bob@example.com", "carol@example.com"])
+    }
+
+    // MARK: - Test 6: chunk-local thread aggregates (unreadCount, messageCount, lastMessageAt, snippet)
+
+    func testChunkLocalThreadAggregatesAreCorrect() async throws {
+        let respBoundary = "rb6"
+        StubURLProtocol.handler = { [self] req in
+            if let t = self.tokenResponse(req) { return t }
+            // Three messages on the same thread "t1". Two are UNREAD, one is read.
+            // Three different internalDates; "m3" is the newest.
+            let parts: [(Int, String, [(String, String)], String)] = [
+                (200, "OK", [("Content-Type", "application/json")],
+                 self.gmailMessageJSON(id: "m1", threadId: "t1", snippet: "oldest snippet",
+                                        labelIds: ["INBOX", "UNREAD"], internalDate: "1700000000000",
+                                        headers: [("Subject", "first subject")])),
+                (200, "OK", [("Content-Type", "application/json")],
+                 self.gmailMessageJSON(id: "m2", threadId: "t1", snippet: "middle snippet",
+                                        labelIds: ["INBOX"], internalDate: "1700000001000",
+                                        headers: [("Subject", "second subject")])),
+                (200, "OK", [("Content-Type", "application/json")],
+                 self.gmailMessageJSON(id: "m3", threadId: "t1", snippet: "newest snippet",
+                                        labelIds: ["INBOX", "UNREAD"], internalDate: "1700000002000",
+                                        headers: [("Subject", "third subject")])),
+            ]
+            let body = makeBatchResponseBody(boundary: respBoundary, parts: parts)
+            let resp = HTTPURLResponse(
+                url: req.url!, statusCode: 200, httpVersion: nil,
+                headerFields: ["Content-Type": "multipart/mixed; boundary=\(respBoundary)"]
+            )!
+            return (resp, body)
+        }
+
+        let db = try makeDB()
+        let syncer = MetadataBatchSyncer(
+            client: MessagesListTests.makeClient(),
+            db: db.queue,
+            accountID: "acct-1"
+        )
+        let refs = [
+            MessageRef(id: "m1", threadId: "t1"),
+            MessageRef(id: "m2", threadId: "t1"),
+            MessageRef(id: "m3", threadId: "t1"),
+        ]
+        try await syncer.sync(refs)
+
+        let thread = try await db.queue.read { try MailThread.fetchOne($0, key: "t1") }
+        XCTAssertNotNil(thread)
+        XCTAssertEqual(thread?.unreadCount, 2)
+        XCTAssertEqual(thread?.messageCount, 3)
+        XCTAssertEqual(thread?.lastMessageAt, Date(timeIntervalSince1970: 1700000002.0))
+        XCTAssertEqual(thread?.snippet, "newest snippet")
+        XCTAssertEqual(thread?.subject, "third subject")
     }
 }

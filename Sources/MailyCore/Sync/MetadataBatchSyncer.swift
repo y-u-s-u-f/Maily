@@ -79,20 +79,57 @@ public actor MetadataBatchSyncer {
             return
         }
 
-        // Build per-thread snapshots (last-write-wins within the chunk for
-        // threads that share multiple messages).
-        var threadByID: [String: MailThread] = [:]
+        // NOTE: Thread aggregates (unreadCount, messageCount, lastMessageAt, snippet, subject)
+        // are chunk-local — a thread spanning multiple chunks will have its row overwritten
+        // by each chunk's view. True per-thread reconciliation is deferred to a later sync stage.
+        struct ThreadAccumulator {
+            var unreadCount: Int = 0
+            var messageCount: Int = 0
+            var lastMessageAt: Date? = nil
+            var snippet: String? = nil
+            var subject: String? = nil
+        }
+
+        var accumByID: [String: ThreadAccumulator] = [:]
         for msg in decoded {
-            let subject = Self.header(msg, name: "Subject")
-            let lastAt = Self.internalDateToDate(msg.internalDate)
-            let unread = (msg.labelIds ?? []).contains("UNREAD") ? 1 : 0
-            threadByID[msg.threadId] = MailThread(
-                id: msg.threadId,
+            var acc = accumByID[msg.threadId] ?? ThreadAccumulator()
+            acc.messageCount += 1
+            if (msg.labelIds ?? []).contains("UNREAD") {
+                acc.unreadCount += 1
+            }
+            let msgDate = Self.internalDateToDate(msg.internalDate)
+            // "Newest" wins for snippet/subject/lastMessageAt. A nil-dated
+            // message only wins if no dated message has been seen yet.
+            let shouldReplace: Bool
+            switch (msgDate, acc.lastMessageAt) {
+            case let (newDate?, existingDate?):
+                shouldReplace = newDate >= existingDate
+            case (.some, .none):
+                shouldReplace = true
+            case (.none, .none):
+                // No dated message seen yet — let the latest nil-dated message
+                // populate snippet/subject so we don't leave the row empty.
+                shouldReplace = acc.snippet == nil && acc.subject == nil && acc.messageCount == 1
+            case (.none, .some):
+                shouldReplace = false
+            }
+            if shouldReplace {
+                acc.lastMessageAt = msgDate
+                acc.snippet = msg.snippet
+                acc.subject = Self.header(msg, name: "Subject")
+            }
+            accumByID[msg.threadId] = acc
+        }
+
+        let threads: [MailThread] = accumByID.map { (threadId, acc) in
+            MailThread(
+                id: threadId,
                 accountId: accountID,
-                snippet: msg.snippet,
-                subject: subject,
-                lastMessageAt: lastAt,
-                unreadCount: unread
+                snippet: acc.snippet,
+                subject: acc.subject,
+                lastMessageAt: acc.lastMessageAt,
+                unreadCount: acc.unreadCount,
+                messageCount: acc.messageCount
             )
         }
 
@@ -113,7 +150,6 @@ public actor MetadataBatchSyncer {
             )
         }
 
-        let threads = Array(threadByID.values)
         try await db.write { db in
             // Threads first — messages have a FK on threads(id).
             for t in threads { try t.upsert(db) }
