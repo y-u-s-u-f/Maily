@@ -1,3 +1,4 @@
+// NOTE: rapid-selection "latest wins" coverage deferred to M5+ when repo calls suspend; the previous sync test was structurally vacuous.
 import XCTest
 import GRDB
 @testable import MailyCore
@@ -68,30 +69,6 @@ final class ReadingPaneViewModelTests: XCTestCase {
         XCTAssertEqual(vm.loadError, "Thread not found")
         XCTAssertNil(vm.thread)
         XCTAssertEqual(vm.messages, [])
-        XCTAssertFalse(vm.isLoading)
-    }
-
-    func testRapidSelectionLatestWins() async throws {
-        let (_, tRepo, mRepo) = try makeFixture()
-        try tRepo.upsertAll([
-            MailThread(id: "a", accountId: "acct", subject: "A"),
-            MailThread(id: "b", accountId: "acct", subject: "B"),
-        ])
-        try mRepo.upsertAll([
-            Message(id: "ma", threadId: "a", accountId: "acct", date: Date()),
-            Message(id: "mb", threadId: "b", accountId: "acct", date: Date()),
-        ])
-
-        let vm = ReadingPaneViewModel(accountID: "acct", threadRepo: tRepo, messageRepo: mRepo)
-
-        // Kick off the first; do not await it.
-        Task { await vm.setSelection("a") }
-        // Immediately fire the second and await it.
-        await vm.setSelection("b")
-
-        XCTAssertEqual(vm.thread?.id, "b")
-        XCTAssertEqual(vm.messages.map(\.id), ["mb"])
-        XCTAssertNil(vm.loadError)
         XCTAssertFalse(vm.isLoading)
     }
 
