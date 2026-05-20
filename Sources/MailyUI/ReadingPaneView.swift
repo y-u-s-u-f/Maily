@@ -9,15 +9,27 @@ private let readingDateFormatter: DateFormatter = {
 }()
 
 public struct ReadingPaneView: View {
-    public let thread: MailThread?
+    @ObservedObject public var viewModel: ReadingPaneViewModel
 
-    public init(thread: MailThread?) {
-        self.thread = thread
+    public init(viewModel: ReadingPaneViewModel) {
+        self.viewModel = viewModel
     }
 
     public var body: some View {
         ScrollView {
-            if let thread {
+            if viewModel.isLoading {
+                ProgressView()
+                    .padding(.top, 80)
+                    .frame(maxWidth: .infinity)
+                    .accessibilityIdentifier("reading-loading")
+            } else if let error = viewModel.loadError {
+                Text(error)
+                    .font(.callout)
+                    .foregroundStyle(.red)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .padding(.top, 80)
+                    .accessibilityIdentifier("reading-error")
+            } else if let thread = viewModel.thread {
                 VStack(alignment: .leading, spacing: 16) {
                     Text(thread.subject ?? "")
                         .font(.title2)
@@ -33,10 +45,9 @@ public struct ReadingPaneView: View {
 
                     Divider()
 
-                    Text(thread.snippet ?? "")
-                        .font(.body)
-                        .foregroundStyle(.primary)
-                        .accessibilityIdentifier("reading-snippet")
+                    ForEach(viewModel.messages, id: \.id) { message in
+                        messageRow(message)
+                    }
                 }
                 .padding(24)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -50,6 +61,19 @@ public struct ReadingPaneView: View {
             }
         }
         .accessibilityIdentifier("ReadingPane")
+    }
+
+    private func messageRow(_ message: Message) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(message.fromAddr ?? "")
+                .font(.subheadline)
+                .fontWeight(.semibold)
+                .foregroundStyle(.primary)
+            Text(message.bodyText ?? message.snippet ?? "")
+                .font(.body)
+                .foregroundStyle(.primary)
+            Divider()
+        }
     }
 
     private func headerRow(label: String, value: String) -> some View {
