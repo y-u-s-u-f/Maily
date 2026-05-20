@@ -1,11 +1,17 @@
 import SwiftUI
+import MailyCore
 
-// MARK: - ReadingPaneView
+private let readingDateFormatter: DateFormatter = {
+    let f = DateFormatter()
+    f.dateStyle = .medium
+    f.timeStyle = .short
+    return f
+}()
 
 public struct ReadingPaneView: View {
-    public let thread: ThreadRow?
+    public let thread: MailThread?
 
-    public init(thread: ThreadRow?) {
+    public init(thread: MailThread?) {
         self.thread = thread
     }
 
@@ -13,23 +19,21 @@ public struct ReadingPaneView: View {
         ScrollView {
             if let thread {
                 VStack(alignment: .leading, spacing: 16) {
-                    Text(thread.subject)
+                    Text(thread.subject ?? "")
                         .font(.title2)
                         .fontWeight(.semibold)
                         .accessibilityIdentifier("reading-subject")
 
                     Divider()
 
-                    VStack(alignment: .leading, spacing: 6) {
-                        headerRow(label: "From", value: thread.sender)
-                        headerRow(label: "To",   value: thread.to)
-                        headerRow(label: "Date",  value: thread.timestamp)
+                    if let date = thread.lastMessageAt {
+                        headerRow(label: "Date", value: readingDateFormatter.string(from: date))
+                            .font(.callout)
                     }
-                    .font(.callout)
 
                     Divider()
 
-                    Text(thread.snippet)
+                    Text(thread.snippet ?? "")
                         .font(.body)
                         .foregroundStyle(.primary)
                         .accessibilityIdentifier("reading-snippet")

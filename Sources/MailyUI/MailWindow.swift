@@ -1,27 +1,28 @@
 import SwiftUI
-
-// MARK: - MailWindow Scene
+import MailyCore
 
 public struct MailWindow: Scene {
-    public init() {}
+    @ObservedObject private var viewModel: InboxViewModel
+
+    public init(viewModel: InboxViewModel) {
+        self.viewModel = viewModel
+    }
 
     public var body: some Scene {
         Window("Maily", id: "mail-main") {
-            MailRootView()
+            MailRootView(viewModel: viewModel)
         }
         .defaultSize(width: 1100, height: 680)
     }
 }
 
-// MARK: - MailRootView
-
-/// Root content view — owns all top-level @State.
 struct MailRootView: View {
+    @ObservedObject var viewModel: InboxViewModel
     @State private var sidebarSelection: SidebarItem = .inbox
     @State private var selectedThreadID: String? = nil
 
-    private var selectedThread: ThreadRow? {
-        sampleThreads.first { $0.id == selectedThreadID }
+    private var selectedThread: MailThread? {
+        viewModel.threads.first { $0.id == selectedThreadID }
     }
 
     var body: some View {
@@ -30,7 +31,7 @@ struct MailRootView: View {
                 .frame(minWidth: 180, idealWidth: 180, maxWidth: 180)
                 .accessibilityIdentifier("Sidebar")
         } content: {
-            ThreadListView(threads: sampleThreads, selectedThreadID: $selectedThreadID)
+            ThreadListView(threads: viewModel.threads, selectedThreadID: $selectedThreadID)
                 .frame(minWidth: 320, idealWidth: 320, maxWidth: 320)
                 .accessibilityIdentifier("ThreadList")
         } detail: {
