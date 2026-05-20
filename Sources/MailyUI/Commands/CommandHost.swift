@@ -2,9 +2,10 @@
 // CommandRegistry, registers the day-one commands, installs the keyboard
 // router, and owns the PaletteWindowController so ⌘K can fire.
 //
-// Thread/Compose/Navigation action stubs live here until later milestones
-// connect them to real handlers. PaletteActions is the only action protocol
-// fully wired in M6.
+// PaletteActions and ComposeActions are wired end-to-end as of M9;
+// ThreadActions and NavigationActions remain Noop stubs until M10 lands
+// the @MainActor selection coordinator that bridges SwiftUI @State
+// (selectedThreadID) to the Sendable command closures.
 import AppKit
 import MailyCore
 
@@ -25,7 +26,8 @@ public final class CommandHost {
     }
 
     public static func bootstrap(
-        contextProvider: @escaping @MainActor () -> CommandContext
+        contextProvider: @escaping @MainActor () -> CommandContext,
+        composeActions: ComposeActions
     ) async -> CommandHost {
         let registry = CommandRegistry()
         let paletteController = PaletteWindowController(
@@ -33,12 +35,13 @@ public final class CommandHost {
             contextProvider: contextProvider
         )
 
-        // M6 only wires PaletteActions end-to-end; the rest are no-op stubs
-        // until later milestones bind real handlers.
+        // M9 wires PaletteActions + ComposeActions end-to-end. ThreadActions
+        // and NavigationActions stay no-op until a Selection coordinator
+        // lands in M10 (see note below).
         let paletteActions = PaletteActionsImpl(controller: paletteController)
         let commands = DayOneCommands.all(
             threadActions: NoopThreadActions(),
-            composeActions: NoopComposeActions(),
+            composeActions: composeActions,
             navigationActions: NoopNavigationActions(),
             paletteActions: paletteActions
         )
@@ -78,6 +81,12 @@ private final class PaletteActionsImpl: PaletteActions, @unchecked Sendable {
 
 // MARK: - Stubs (filled in by later milestones)
 
+// TODO(M10): NoopThreadActions / NoopNavigationActions remain stubs because
+// j/k/e have to drive the SwiftUI `selectedThreadID` @State in `MailRootView`.
+// That requires a @MainActor selection coordinator owned by `MailyApp` and
+// injected into both `MailRootView` and `CommandHost.bootstrap(...)`. The M9
+// wire-up audit doesn't list these — they're explicitly tracked for M10.
+
 private struct NoopThreadActions: ThreadActions {
     func archiveCurrent() async {}
     func deleteCurrent() async {}
@@ -89,10 +98,4 @@ private struct NoopThreadActions: ThreadActions {
 private struct NoopNavigationActions: NavigationActions {
     func nextThread() async {}
     func prevThread() async {}
-}
-
-private struct NoopComposeActions: ComposeActions {
-    func openNewCompose() async {}
-    func sendCurrentCompose() async {}
-    func replyToCurrent(replyAll: Bool) async {}
 }

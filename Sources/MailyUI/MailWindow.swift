@@ -7,19 +7,22 @@ public struct MailWindow: Scene {
     private let accountID: String
     private let threadRepo: ThreadRepository
     private let messageRepo: MessageRepository
+    private let composeActions: ComposeActions
 
     public init(
         viewModel: InboxViewModel,
         syncStatus: SyncStatusViewModel,
         accountID: String,
         threadRepo: ThreadRepository,
-        messageRepo: MessageRepository
+        messageRepo: MessageRepository,
+        composeActions: ComposeActions
     ) {
         self.viewModel = viewModel
         self.syncStatus = syncStatus
         self.accountID = accountID
         self.threadRepo = threadRepo
         self.messageRepo = messageRepo
+        self.composeActions = composeActions
     }
 
     public var body: some Scene {
@@ -29,7 +32,8 @@ public struct MailWindow: Scene {
                 syncStatus: syncStatus,
                 accountID: accountID,
                 threadRepo: threadRepo,
-                messageRepo: messageRepo
+                messageRepo: messageRepo,
+                composeActions: composeActions
             )
         }
         .defaultSize(width: 1100, height: 680)
@@ -43,16 +47,19 @@ struct MailRootView: View {
     @State private var sidebarSelection: SidebarItem = .inbox
     @State private var selectedThreadID: String? = nil
     @State private var commandHost: CommandHost?
+    private let composeActions: ComposeActions
 
     init(
         viewModel: InboxViewModel,
         syncStatus: SyncStatusViewModel,
         accountID: String,
         threadRepo: ThreadRepository,
-        messageRepo: MessageRepository
+        messageRepo: MessageRepository,
+        composeActions: ComposeActions
     ) {
         self.viewModel = viewModel
         self.syncStatus = syncStatus
+        self.composeActions = composeActions
         _readingVM = StateObject(wrappedValue: ReadingPaneViewModel(
             accountID: accountID,
             threadRepo: threadRepo,
@@ -93,7 +100,8 @@ struct MailRootView: View {
                             focus: self.currentFocus,
                             selectedThreadID: self.selectedThreadID
                         )
-                    }
+                    },
+                    composeActions: composeActions
                 )
             }
 
