@@ -28,7 +28,7 @@ let package = Package(
         ),
         .testTarget(
             name: "MailyAppTests",
-            dependencies: ["MailyApp", "MailyUI"]
+            dependencies: ["MailyApp", "MailyCore", "MailyUI"]
         ),
         .testTarget(
             name: "MailyCoreTests",
