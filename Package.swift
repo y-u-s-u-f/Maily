@@ -23,7 +23,12 @@ let package = Package(
         ),
         .executableTarget(
             name: "MailyApp",
-            dependencies: ["MailyCore", "MailyUI"]
+            dependencies: ["MailyCore", "MailyUI"],
+            resources: [.process("Resources")]
+        ),
+        .testTarget(
+            name: "MailyAppTests",
+            dependencies: ["MailyApp", "MailyCore", "MailyUI"]
         ),
         .testTarget(
             name: "MailyCoreTests",
@@ -32,10 +37,6 @@ let package = Package(
         .testTarget(
             name: "MailyUITests",
             dependencies: ["MailyUI", "MailyCore"]
-        ),
-        .testTarget(
-            name: "MailyAppTests",
-            dependencies: ["MailyApp", "MailyCore"]
         ),
     ]
 )
