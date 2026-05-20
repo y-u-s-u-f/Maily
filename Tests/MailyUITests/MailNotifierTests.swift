@@ -172,6 +172,16 @@ final class MailNotifierTests: XCTestCase {
         XCTAssertEqual(count, 1, "label flip must not re-notify")
     }
 
+    func testSystemNotificationAuthorityReturnsFalseWithoutBundleID() async {
+        // `swift test` runs in xctest.tool, not inside a real `.app` bundle.
+        // The system authority must fail soft (returning false) instead of
+        // throwing an uncatchable NSException from
+        // UNUserNotificationCenter.current(). The test passing demonstrates
+        // requestAuth() returns cleanly rather than crashing.
+        let granted = await SystemNotificationAuthority().requestAuth()
+        XCTAssertFalse(granted)
+    }
+
     func testReadMessageDoesNotNotify() async throws {
         let (_, repo, threads) = try makeFixture()
         try threads.upsert(MailThread(id: "tr", accountId: "acct"))
