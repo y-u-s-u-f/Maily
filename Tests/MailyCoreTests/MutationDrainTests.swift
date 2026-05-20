@@ -207,6 +207,56 @@ final class MutationDrainTests: XCTestCase {
         XCTAssertEqual(try pendingCount(db), 0)
     }
 
+    func testRunOnceSendOn400DeadRowsWithoutRollback() async throws {
+        // 4xx (non-429) is a permanent failure: the row must be retained
+        // as "dead" with `last_error` populated and `attempts` bumped.
+        // Critically for send, there is no optimistic local state to
+        // roll back, so the only outward sign should be the dead row
+        // itself — no spurious Message inserts/deletes, no thread
+        // label changes.
+        let (db, client) = try makeFixture(threadLabels: ["INBOX"])
+        let payload = try MutationPayload.encode(MutationPayload.Send(
+            from: "alice@example.com",
+            to: ["bob@example.com"],
+            subject: "Hi",
+            body: "hello",
+            threadId: "t1"
+        ))
+        let id = try insertMutation(db, kind: .send, payloadJson: payload)
+
+        StubURLProtocol.handler = { req in
+            if let t = self.tokenStub(req) { return t }
+            return (HTTPURLResponse(url: req.url!, statusCode: 400, httpVersion: nil, headerFields: nil)!,
+                    Data("bad request".utf8))
+        }
+
+        let failures = FailureLog()
+        let drain = MutationDrain(db: db.queue, client: client, sleeper: { _ in })
+        await drain.setOnPermanentFailure { mid, err in
+            failures.record(id: mid, error: err)
+        }
+        await drain.runOnce()
+
+        // Row retained as dead.
+        XCTAssertEqual(try pendingCount(db), 1, "row is retained on non-retryable 4xx")
+        let row = try XCTUnwrap(try fetchMutation(db, id: id))
+        XCTAssertGreaterThanOrEqual(row.attempts, 1)
+        let lastError = try XCTUnwrap(row.lastError)
+        XCTAssertTrue(lastError.contains("400"), "last_error should reflect 4xx: got \(lastError)")
+        // No rollback path for send: the appended "rollback failed:"
+        // suffix must NOT appear, because there's nothing to roll back.
+        XCTAssertFalse(lastError.contains("rollback failed:"),
+                       "send has no local optimistic state — rollback must be a no-op")
+        XCTAssertEqual(failures.count, 1)
+        XCTAssertEqual(failures.firstID, id)
+
+        // Thread untouched — `send` rollback is a no-op, and even on a
+        // dispatch failure we never touched the thread row to begin with.
+        let fetched = try await db.queue.read { try MailThread.fetchOne($0, key: "t1") }
+        let thread = try XCTUnwrap(fetched)
+        XCTAssertEqual(thread.labelIds, ["INBOX"])
+    }
+
     // MARK: - retry / failure
 
     func testRunOnceOn5xxLeavesRowAndBumpsAttempts() async throws {
