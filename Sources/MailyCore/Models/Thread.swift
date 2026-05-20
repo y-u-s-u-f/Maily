@@ -1,7 +1,7 @@
 import Foundation
 import GRDB
 
-public struct MailThread: Codable, Equatable, FetchableRecord, PersistableRecord {
+public struct MailThread: Codable, Equatable, Sendable, FetchableRecord, PersistableRecord {
     public var id: String
     public var accountId: String
     public var snippet: String?
