@@ -5,7 +5,7 @@ import SwiftUI
 /// than the window; the VM is the source of truth for form state and
 /// send lifecycle.
 @MainActor
-public final class ComposeWindowController: NSWindowController, NSWindowDelegate {
+public final class ComposeWindowController: NSWindowController {
 
     public let viewModel: ComposeViewModel
 
@@ -26,7 +26,6 @@ public final class ComposeWindowController: NSWindowController, NSWindowDelegate
         window.center()
 
         super.init(window: window)
-        window.delegate = self
     }
 
     @available(*, unavailable)
@@ -51,8 +50,7 @@ public final class ComposeWindowController: NSWindowController, NSWindowDelegate
         case .new:
             window?.title = "New message"
         case .reply:
-            let subj = viewModel.subject.isEmpty ? "" : viewModel.subject
-            window?.title = subj.isEmpty ? "Reply" : "Reply: \(subj)"
+            window?.title = viewModel.subject.isEmpty ? "Reply" : "Reply: \(viewModel.subject)"
         }
     }
 

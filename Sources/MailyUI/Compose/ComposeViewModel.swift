@@ -108,23 +108,25 @@ public final class ComposeViewModel: ObservableObject {
         body = Self.quotedReplyBody(source: source)
     }
 
-    /// True when `subject` already begins with `Re:` (case-insensitive,
-    /// optional trailing space) — used to avoid `Re: Re: Re:` chains.
+    /// True when `subject` already begins with `Re:` (case-insensitive) —
+    /// used to avoid `Re: Re: Re:` chains.
     static func startsWithReplyPrefix(_ subject: String) -> Bool {
-        let lowered = subject.lowercased()
-        return lowered.hasPrefix("re:") || lowered.hasPrefix("re :")
+        subject.lowercased().hasPrefix("re:")
     }
 
     static func quotedReplyBody(source: Message) -> String {
         let when: String = {
             guard let date = source.date else { return "" }
             let f = DateFormatter()
+            f.locale = Locale(identifier: "en_US_POSIX")
+            f.timeZone = TimeZone(secondsFromGMT: 0)
             f.dateStyle = .medium
             f.timeStyle = .short
             return f.string(from: date)
         }()
         let who = source.fromAddr ?? ""
-        let raw = source.bodyText ?? source.snippet ?? ""
+        let raw = (source.bodyText ?? source.snippet ?? "")
+            .replacingOccurrences(of: "\r\n", with: "\n")
         // Match the spec's prefix exactly: leading newline so the user's
         // own reply sits on top with whitespace.
         let header = "\nOn \(when) \(who) wrote:\n"
@@ -138,6 +140,7 @@ public final class ComposeViewModel: ObservableObject {
     // MARK: - send
 
     public func send() async {
+        guard !isSending else { return }
         isSending = true
         sendError = nil
 
@@ -187,7 +190,7 @@ public final class ComposeViewModel: ObservableObject {
         }
 
         // Success: leave the fields alone (the window controller is
-        // responsible for closing the window) and reset the sending flag.
+        // responsible for closing the window).
         isSending = false
     }
 

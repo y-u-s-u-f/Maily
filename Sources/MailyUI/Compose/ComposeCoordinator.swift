@@ -74,8 +74,7 @@ public final class ComposeCoordinator: NSObject, ComposeActions, NSWindowDelegat
 
     private func present(_ controller: ComposeWindowController) {
         // Coordinator becomes the window delegate so we can observe key
-        // changes and close events. `ComposeWindowController` is its
-        // own delegate already; we layer a coordinator delegate on top.
+        // changes and close events.
         controller.window?.delegate = self
         openWindows.append(controller)
         focused = controller
@@ -96,9 +95,4 @@ public final class ComposeCoordinator: NSObject, ComposeActions, NSWindowDelegat
         if focused?.window === window { focused = nil }
     }
 
-    // MARK: - test seam
-
-    /// Exposed for tests — the currently-focused controller, or nil if
-    /// no compose window is open. Production code shouldn't need this.
-    public var focusedControllerForTesting: ComposeWindowController? { focused }
 }

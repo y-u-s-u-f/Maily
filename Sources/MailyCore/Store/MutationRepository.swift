@@ -8,9 +8,9 @@ import GRDB
 /// the call-site face — UI code enqueues a row here and the drain takes
 /// it from there.
 ///
-/// Made a protocol so view-model tests can substitute a throwing fake
-/// without spinning up a closed `DatabaseQueue`. `MutationRepository`
-/// (the concrete type) is the only production conformance.
+/// Made a protocol so tests can force an enqueue failure
+/// deterministically via a throwing fake. `MutationRepository` (the
+/// concrete type) is the only production conformance.
 public protocol MutationEnqueuing: Sendable {
     /// Insert `mutation` and return the assigned row id. The id is also
     /// written back into the passed-in `mutation` by GRDB's
