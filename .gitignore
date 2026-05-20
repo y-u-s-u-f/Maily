@@ -10,3 +10,7 @@ Package.resolved
 .netrc
 *.log
 ~/Library/Logs/Maily/
+
+# Secrets — local OAuth credentials, never commit
+Secrets/oauth.json
+Secrets/*.local.json
