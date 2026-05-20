@@ -3,7 +3,7 @@ import AppKit
 
 // MARK: - Thread row data model
 
-public struct ThreadRow: Identifiable, Sendable {
+public struct ThreadRow: Identifiable, Equatable, Sendable {
     public let id: String
     public let sender: String
     public let to: String
@@ -23,7 +23,7 @@ public struct ThreadRow: Identifiable, Sendable {
 
 // MARK: - Hardcoded sample threads
 
-@MainActor public let sampleThreads: [ThreadRow] = [
+public let sampleThreads: [ThreadRow] = [
     ThreadRow(
         id: "t1",
         sender: "GitHub",
@@ -85,10 +85,10 @@ public struct ThreadRow: Identifiable, Sendable {
 // MARK: - NSTableView coordinator
 
 public final class ThreadTableCoordinator: NSObject, NSTableViewDataSource, NSTableViewDelegate {
-    public var threads: [ThreadRow]
-    public var onSelect: (String?) -> Void
+    var threads: [ThreadRow]
+    var onSelect: (String?) -> Void
 
-    public init(threads: [ThreadRow], onSelect: @escaping (String?) -> Void) {
+    init(threads: [ThreadRow], onSelect: @escaping (String?) -> Void) {
         self.threads = threads
         self.onSelect = onSelect
     }
@@ -162,8 +162,8 @@ final class ThreadCellView: NSView {
         NSLayoutConstraint.activate([
             senderLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
             senderLabel.topAnchor.constraint(equalTo: topAnchor, constant: 8),
-            senderLabel.trailingAnchor.constraint(equalTo: timestampLabel.leadingAnchor, constant: -4),
 
+            timestampLabel.leadingAnchor.constraint(equalTo: senderLabel.trailingAnchor, constant: 4),
             timestampLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
             timestampLabel.topAnchor.constraint(equalTo: topAnchor, constant: 8),
             timestampLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 80),
@@ -199,10 +199,7 @@ public struct ThreadListView: NSViewRepresentable {
     }
 
     public func makeCoordinator() -> ThreadTableCoordinator {
-        ThreadTableCoordinator(threads: threads) { [self] id in
-            // Coordinator calls back; binding updated on main thread by SwiftUI
-            selectedThreadID = id
-        }
+        ThreadTableCoordinator(threads: threads, onSelect: { _ in })
     }
 
     public func makeNSView(context: Context) -> NSScrollView {
@@ -233,11 +230,15 @@ public struct ThreadListView: NSViewRepresentable {
 
     public func updateNSView(_ scrollView: NSScrollView, context: Context) {
         guard let tableView = scrollView.documentView as? NSTableView else { return }
-        context.coordinator.threads = threads
+
+        if context.coordinator.threads != threads {
+            context.coordinator.threads = threads
+            tableView.reloadData()
+        }
+
         context.coordinator.onSelect = { id in
             selectedThreadID = id
         }
-        tableView.reloadData()
 
         // Sync selection from state
         if let id = selectedThreadID,

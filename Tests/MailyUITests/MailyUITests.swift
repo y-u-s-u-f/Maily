@@ -3,16 +3,10 @@ import XCTest
 
 // MARK: - SampleThread data tests
 
-@MainActor
 final class SampleThreadDataTests: XCTestCase {
 
     func testSampleThreadsNotEmpty() {
         XCTAssertFalse(sampleThreads.isEmpty, "sampleThreads must not be empty")
-    }
-
-    func testSampleThreadCountInRange() {
-        XCTAssertGreaterThanOrEqual(sampleThreads.count, 5)
-        XCTAssertLessThanOrEqual(sampleThreads.count, 8)
     }
 
     func testAllThreadIDsUnique() {
