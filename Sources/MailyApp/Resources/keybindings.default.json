@@ -1,0 +1,14 @@
+{
+  "shortcuts": {
+    "thread.next": "j",
+    "thread.prev": "k",
+    "thread.open": "Enter",
+    "thread.archive": "e",
+    "thread.delete": "#",
+    "thread.reply": "r",
+    "thread.replyAll": "shift+r",
+    "compose.new": "c",
+    "palette.open": "cmd+k",
+    "compose.send": "cmd+Enter"
+  }
+}
