@@ -187,6 +187,75 @@ final class HistoryWatcherTests: XCTestCase {
         XCTAssertEqual(try repo.allAccounts().first?.historyId, "expired")
     }
 
+    // MARK: - test 7: updateState wakes the current sleep (fix #1)
+    //
+    // After the first poll the watcher is sleeping for 15s in `.focused`.
+    // We flip to `.background`, which should cancel that sleep and cause
+    // the loop to immediately re-evaluate cadence — the NEXT recorded
+    // sleep should be 300s, not 15s.
+    func testUpdateStateWakesCurrentSleepAndAppliesNewCadence() async throws {
+        let (db, repo) = try makeFixture()
+        StubURLProtocol.handler = { req in
+            if req.url?.host == "oauth2.googleapis.com" { return Self.oauthOK(req) }
+            return (HTTPURLResponse(url: req.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!,
+                    Data(#"{"historyId":"h-1"}"#.utf8))
+        }
+        let client = GmailClientTests.makeClient()
+
+        let recorder = WakeableSleeperRecorder()
+        let watcher = HistoryWatcher(
+            client: client,
+            db: db.queue,
+            accountRepo: repo,
+            accountID: "acct",
+            sleeper: { interval in await recorder.sleep(interval) }
+        )
+        await watcher.start()
+
+        // Wait for the first sleep to be entered (15s, post-poll).
+        try await recorder.waitForRecorded(count: 1, timeoutNS: 2_000_000_000)
+        let first = await recorder.intervals
+        XCTAssertEqual(first.first, 15)
+
+        // Flip state — watcher must cancel the 15s sleep so the loop wakes
+        // and records a fresh 300s sleep without us calling release().
+        await watcher.updateState(.background)
+
+        try await recorder.waitForRecorded(count: 2, timeoutNS: 2_000_000_000)
+        let second = await recorder.intervals
+        XCTAssertEqual(second.count >= 2 ? second[1] : nil, 300)
+
+        await recorder.releaseAll()
+        await watcher.stop()
+    }
+
+    // MARK: - test 8: concurrent pollOnce coalesces (fix #3)
+
+    func testConcurrentPollOnceCoalescesIntoSingleNetworkRoundTrip() async throws {
+        let (db, repo) = try makeFixture()
+        let hits = HitCounter()
+        StubURLProtocol.handler = { req in
+            if req.url?.host == "oauth2.googleapis.com" { return Self.oauthOK(req) }
+            // Synchronous bump — protocol invokes this on a serial queue.
+            Task { await hits.bump() }
+            return (HTTPURLResponse(url: req.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!,
+                    Data(#"{"historyId":"h-1"}"#.utf8))
+        }
+        let client = GmailClientTests.makeClient()
+        let watcher = HistoryWatcher(
+            client: client, db: db.queue, accountRepo: repo, accountID: "acct"
+        )
+
+        async let a: Void = watcher.pollOnce()
+        async let b: Void = watcher.pollOnce()
+        _ = try await (a, b)
+
+        // Allow the Task that bumps the counter to flush.
+        try await Task.sleep(nanoseconds: 100_000_000)
+        let count = await hits.value
+        XCTAssertEqual(count, 1, "expected one history.list round-trip, got \(count)")
+    }
+
     // MARK: - test 6: cadence reacts to updateState
 
     func testUpdateStateBackgroundChangesCadence() async throws {
@@ -296,3 +365,60 @@ actor SleeperRecorder {
 }
 
 struct TimeoutError: Error {}
+
+actor HitCounter {
+    var value: Int = 0
+    func bump() { value += 1 }
+}
+
+/// Sleeper that records each interval and blocks on `Task.sleep` (which is
+/// cancellation-aware). Used to verify that `updateState` cancels an in-flight
+/// sleep — when the watcher cancels its `sleepTask`, `Task.sleep` throws and
+/// this returns early, letting the run loop reach the next iteration.
+actor WakeableSleeperRecorder {
+    private(set) var intervals: [TimeInterval] = []
+    private var recordedWaiters: [(Int, CheckedContinuation<Void, Never>)] = []
+    private var liveSleeps: [Task<Void, Never>] = []
+
+    nonisolated func sleep(_ interval: TimeInterval) async {
+        await record(interval)
+        // Use a long sleep so the test's cancellation path is the only way
+        // out. 60s is far above the 2s test timeouts.
+        try? await Task.sleep(nanoseconds: 60 * 1_000_000_000)
+    }
+
+    private func record(_ interval: TimeInterval) {
+        intervals.append(interval)
+        let count = intervals.count
+        recordedWaiters.removeAll { (target, cont) in
+            if count >= target { cont.resume(); return true }
+            return false
+        }
+    }
+
+    func releaseAll() {
+        // No-op: the watcher cancels sleepTask in stop(), which makes the
+        // wrapping Task cancel our `Task.sleep` above. Nothing needed here.
+    }
+
+    func waitForRecorded(count target: Int, timeoutNS: UInt64) async throws {
+        if intervals.count >= target { return }
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            group.addTask {
+                await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+                    Task { await self.appendRecordedWaiter(target: target, cont: cont) }
+                }
+            }
+            group.addTask {
+                try await Task.sleep(nanoseconds: timeoutNS)
+                throw TimeoutError()
+            }
+            try await group.next()
+            group.cancelAll()
+        }
+    }
+
+    private func appendRecordedWaiter(target: Int, cont: CheckedContinuation<Void, Never>) {
+        if intervals.count >= target { cont.resume() } else { recordedWaiters.append((target, cont)) }
+    }
+}

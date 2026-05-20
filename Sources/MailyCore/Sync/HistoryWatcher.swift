@@ -21,14 +21,20 @@ public actor HistoryWatcher {
 
     private let client: GmailClient
     private let db: any DatabaseWriter
+    // Kept for API symmetry with the spec; all writes are inlined into the
+    // single poll transaction below for atomicity, so this repo is unused.
     private let accountRepo: AccountRepository
     private let accountID: String
     private var state: AppState
     private let sleeper: @Sendable (TimeInterval) async -> Void
     private let onHistoryExpired: @Sendable () -> Void
+    /// Callback fired after a successful poll. The Int is the number of
+    /// `HistoryEntry` items applied during this poll.
     private let onPolled: @Sendable (Int) -> Void
 
     private var runTask: Task<Void, Never>?
+    private var sleepTask: Task<Void, Never>?
+    private var inFlight: Task<Void, Error>?
 
     public init(
         client: GmailClient,
@@ -52,9 +58,13 @@ public actor HistoryWatcher {
 
     public func updateState(_ state: AppState) async {
         self.state = state
+        // Wake any in-progress sleep so the new cadence takes effect now,
+        // rather than after the current sleep interval (up to 1h) elapses.
+        sleepTask?.cancel()
     }
 
     public func start() async {
+        // No-op if a run loop is already in flight — prevents double-start.
         if runTask != nil { return }
         runTask = Task { [weak self] in
             await self?.runLoop()
@@ -63,9 +73,27 @@ public actor HistoryWatcher {
 
     public func stop() async {
         guard let task = runTask else { return }
-        runTask = nil
         task.cancel()
+        sleepTask?.cancel()
+        // Await completion BEFORE clearing runTask so a racing start() can't
+        // spawn a second loop while this one is still winding down.
         _ = await task.value
+        runTask = nil
+    }
+
+    /// Best-effort cleanup. Callers should still prefer explicit `stop()`.
+    deinit {
+        runTask?.cancel()
+        sleepTask?.cancel()
+    }
+
+    /// Cancellable sleep — wraps the injected sleeper in a Task so
+    /// `updateState` / `stop` can cut it short via `sleepTask?.cancel()`.
+    private func sleep(_ interval: TimeInterval) async {
+        let task = Task { await sleeper(interval) }
+        sleepTask = task
+        _ = await task.value
+        sleepTask = nil
     }
 
     // MARK: - run loop
@@ -74,7 +102,7 @@ public actor HistoryWatcher {
         while !Task.isCancelled {
             let currentState = state
             if currentState == .closed {
-                await sleeper(3600)
+                await sleep(3600)
                 continue
             }
             do {
@@ -89,13 +117,26 @@ public actor HistoryWatcher {
             case .background: interval = 300
             case .closed: interval = 3600
             }
-            await sleeper(interval)
+            await sleep(interval)
         }
     }
 
     // MARK: - one poll
 
     public func pollOnce() async throws {
+        // Coalesce overlapping callers — concurrent invocations await the
+        // single in-flight poll rather than racing on the baseline read.
+        if let existing = inFlight {
+            try await existing.value
+            return
+        }
+        let task = Task { try await performPoll() }
+        inFlight = task
+        defer { inFlight = nil }
+        try await task.value
+    }
+
+    private func performPoll() async throws {
         // Read baseline history_id outside the write transaction.
         let baseline: String? = try await db.read { db in
             try Account.fetchOne(db, key: self.accountID)?.historyId
@@ -184,8 +225,7 @@ public actor HistoryWatcher {
         // Preserve existing labels if the thread already exists.
         if let existing = try MailThread.fetchOne(db, key: ref.threadId) {
             var updated = existing
-            let merged = Set(existing.labelIds).union(labels)
-            updated.labelIds = Array(merged)
+            updated.labelIds = existing.labelIds + labels.filter { !existing.labelIds.contains($0) }
             try updated.upsert(db)
         } else {
             let thread = MailThread(
@@ -198,8 +238,7 @@ public actor HistoryWatcher {
         // Upsert message.
         if let existing = try Message.fetchOne(db, key: ref.id) {
             var updated = existing
-            let merged = Set(existing.labelIds).union(labels)
-            updated.labelIds = Array(merged)
+            updated.labelIds = existing.labelIds + labels.filter { !existing.labelIds.contains($0) }
             try updated.upsert(db)
         } else {
             let message = Message(
@@ -231,8 +270,7 @@ public actor HistoryWatcher {
         guard var message = try Message.fetchOne(db, key: ref.id) else {
             return  // unknown message — skeleton not yet present; skip
         }
-        let merged = Set(message.labelIds).union(toAdd)
-        message.labelIds = Array(merged)
+        message.labelIds = message.labelIds + toAdd.filter { !message.labelIds.contains($0) }
         try message.update(db)
         if toAdd.contains("UNREAD") {
             try recomputeUnreadCount(threadId: ref.threadId, db: db)
