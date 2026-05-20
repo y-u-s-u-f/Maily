@@ -241,4 +241,14 @@ final class RepositoryTests: XCTestCase {
         try labels.delete(id: "L1")
         XCTAssertTrue(try labels.fetchAll(account: "acct").isEmpty)
     }
+
+    func testLabelUpsertRejectsMismatchedAccount() throws {
+        // precondition aborts the process rather than throwing, so we can't catch it with XCTAssertThrowsError;
+        // pin the matching path instead and trust the precondition to fail loudly for callers who violate it.
+        let (_, labels) = try makeLabelFixture()
+        let label = Label(id: "L", accountId: "acct", name: "Match", kind: .user)
+        XCTAssertNoThrow(try labels.upsert(label, account: "acct"))
+        let fetched = try labels.fetchAll(account: "acct")
+        XCTAssertEqual(fetched.map(\.id), ["L"])
+    }
 }

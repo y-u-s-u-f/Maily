@@ -8,20 +8,18 @@ public struct LabelRepository {
         self.queue = queue
     }
 
-    // The `account` arg scopes the operation and is force-assigned onto the
-    // label's accountId to prevent cross-account leakage from miswired callers.
     public func upsert(_ label: Label, account: String) throws {
-        var scoped = label
-        scoped.accountId = account
-        try queue.write { try scoped.upsert($0) }
+        precondition(label.accountId == account, "label.accountId must match account argument")
+        try queue.write { try label.upsert($0) }
     }
 
     public func upsertAll(_ labels: [Label], account: String) throws {
+        for l in labels {
+            precondition(l.accountId == account, "label.accountId must match account argument")
+        }
         try queue.write { db in
             for l in labels {
-                var scoped = l
-                scoped.accountId = account
-                try scoped.upsert(db)
+                try l.upsert(db)
             }
         }
     }
