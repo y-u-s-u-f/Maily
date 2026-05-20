@@ -1,7 +1,7 @@
 import Foundation
 import GRDB
 
-public struct AccountRepository {
+public struct AccountRepository: Sendable {
     public let queue: DatabaseQueue
 
     public init(queue: DatabaseQueue) {
