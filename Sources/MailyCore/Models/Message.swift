@@ -11,7 +11,7 @@ public struct MessageFlags: OptionSet, Codable, Equatable, Sendable {
     public static let trash   = MessageFlags(rawValue: 1 << 3)
 }
 
-public struct Message: Codable, Equatable, FetchableRecord, PersistableRecord {
+public struct Message: Codable, Equatable, Sendable, FetchableRecord, PersistableRecord {
     public var id: String
     public var threadId: String
     public var accountId: String
