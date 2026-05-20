@@ -9,7 +9,7 @@ public enum MutationKind: String, Codable {
     case markRead
 }
 
-public struct PendingMutation: Codable, Equatable, FetchableRecord, MutablePersistableRecord {
+public struct PendingMutation: Codable, Equatable, Sendable, FetchableRecord, MutablePersistableRecord {
     public var id: Int64?
     public var accountId: String
     public var kindRaw: String
