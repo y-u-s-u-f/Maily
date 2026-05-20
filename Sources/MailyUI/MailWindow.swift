@@ -3,17 +3,20 @@ import MailyCore
 
 public struct MailWindow: Scene {
     @ObservedObject private var viewModel: InboxViewModel
+    @ObservedObject private var syncStatus: SyncStatusViewModel
     private let accountID: String
     private let threadRepo: ThreadRepository
     private let messageRepo: MessageRepository
 
     public init(
         viewModel: InboxViewModel,
+        syncStatus: SyncStatusViewModel,
         accountID: String,
         threadRepo: ThreadRepository,
         messageRepo: MessageRepository
     ) {
         self.viewModel = viewModel
+        self.syncStatus = syncStatus
         self.accountID = accountID
         self.threadRepo = threadRepo
         self.messageRepo = messageRepo
@@ -23,6 +26,7 @@ public struct MailWindow: Scene {
         Window("Maily", id: "mail-main") {
             MailRootView(
                 viewModel: viewModel,
+                syncStatus: syncStatus,
                 accountID: accountID,
                 threadRepo: threadRepo,
                 messageRepo: messageRepo
@@ -34,6 +38,7 @@ public struct MailWindow: Scene {
 
 struct MailRootView: View {
     @ObservedObject var viewModel: InboxViewModel
+    @ObservedObject var syncStatus: SyncStatusViewModel
     @StateObject private var readingVM: ReadingPaneViewModel
     @State private var sidebarSelection: SidebarItem = .inbox
     @State private var selectedThreadID: String? = nil
@@ -41,11 +46,13 @@ struct MailRootView: View {
 
     init(
         viewModel: InboxViewModel,
+        syncStatus: SyncStatusViewModel,
         accountID: String,
         threadRepo: ThreadRepository,
         messageRepo: MessageRepository
     ) {
         self.viewModel = viewModel
+        self.syncStatus = syncStatus
         _readingVM = StateObject(wrappedValue: ReadingPaneViewModel(
             accountID: accountID,
             threadRepo: threadRepo,
@@ -60,33 +67,38 @@ struct MailRootView: View {
     }
 
     var body: some View {
-        NavigationSplitView {
-            SidebarView(selection: $sidebarSelection)
-                .frame(minWidth: 180, idealWidth: 180, maxWidth: 180)
-                .accessibilityIdentifier("Sidebar")
-        } content: {
-            ThreadListView(threads: viewModel.threads, selectedThreadID: $selectedThreadID)
-                .frame(minWidth: 320, idealWidth: 320, maxWidth: 320)
-                .accessibilityIdentifier("ThreadList")
-        } detail: {
-            ReadingPaneView(viewModel: readingVM)
-                .frame(minWidth: 400)
-                .accessibilityIdentifier("ReadingPane")
-        }
-        .frame(minWidth: 720, minHeight: 480)
-        .onChange(of: selectedThreadID) { _, newValue in
-            Task { await readingVM.setSelection(newValue) }
-        }
-        .task {
-            guard commandHost == nil else { return }
-            commandHost = await CommandHost.bootstrap(
-                contextProvider: { [self] in
-                    CommandContext(
-                        focus: self.currentFocus,
-                        selectedThreadID: self.selectedThreadID
-                    )
-                }
-            )
+        VStack(spacing: 0) {
+            NavigationSplitView {
+                SidebarView(selection: $sidebarSelection)
+                    .frame(minWidth: 180, idealWidth: 180, maxWidth: 180)
+                    .accessibilityIdentifier("Sidebar")
+            } content: {
+                ThreadListView(threads: viewModel.threads, selectedThreadID: $selectedThreadID)
+                    .frame(minWidth: 320, idealWidth: 320, maxWidth: 320)
+                    .accessibilityIdentifier("ThreadList")
+            } detail: {
+                ReadingPaneView(viewModel: readingVM)
+                    .frame(minWidth: 400)
+                    .accessibilityIdentifier("ReadingPane")
+            }
+            .frame(minWidth: 720, minHeight: 480)
+            .onChange(of: selectedThreadID) { _, newValue in
+                Task { await readingVM.setSelection(newValue) }
+            }
+            .task {
+                guard commandHost == nil else { return }
+                commandHost = await CommandHost.bootstrap(
+                    contextProvider: { [self] in
+                        CommandContext(
+                            focus: self.currentFocus,
+                            selectedThreadID: self.selectedThreadID
+                        )
+                    }
+                )
+            }
+
+            StatusBarView(viewModel: syncStatus)
+                .task { await syncStatus.start() }
         }
     }
 }

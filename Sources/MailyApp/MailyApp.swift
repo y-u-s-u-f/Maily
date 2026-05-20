@@ -9,6 +9,7 @@ struct MailyApp: App {
     private let messageRepo: MessageRepository
     private let syncEngine: SyncEngine
     @StateObject private var viewModel: InboxViewModel
+    @StateObject private var syncStatus: SyncStatusViewModel
 
     init() {
         let db = try! MailyDatabase(location: .inMemory)
@@ -47,6 +48,7 @@ struct MailyApp: App {
         self.threadRepo = threadRepo
         self.messageRepo = messageRepo
         _viewModel = StateObject(wrappedValue: InboxViewModel(repository: threadRepo, accountID: "local"))
+        _syncStatus = StateObject(wrappedValue: SyncStatusViewModel(engine: engine))
 
         Task.detached { await engine.startSync() }
     }
@@ -54,6 +56,7 @@ struct MailyApp: App {
     var body: some Scene {
         MailWindow(
             viewModel: viewModel,
+            syncStatus: syncStatus,
             accountID: "local",
             threadRepo: threadRepo,
             messageRepo: messageRepo
