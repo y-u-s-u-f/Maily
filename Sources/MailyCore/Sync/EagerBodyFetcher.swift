@@ -149,6 +149,9 @@ public actor EagerBodyFetcher {
     ///
     /// Preference order (per spec):
     /// 1. First `text/plain` part with non-nil `body.data` → decode as `bodyText`.
+    ///    If a `text/html` twin also exists in the same payload tree, also
+    ///    decode it (raw, not stripped) into `bodyHtml`. `multipart/alternative`
+    ///    messages almost always carry both, and the reading pane needs HTML.
     /// 2. Else first `text/html` part with non-nil `body.data` → decode HTML,
     ///    store raw as `bodyHtml`, also store HTML-stripped text as `bodyText`.
     /// 3. Else if root payload itself has `body.data`, use its `mimeType` to
@@ -158,7 +161,15 @@ public actor EagerBodyFetcher {
 
         if let plainData = firstPart(payload, mimeType: "text/plain")?.body?.data,
            let decoded = decodeBase64URL(plainData) {
-            return (nil, decoded)
+            // Preserve a sibling text/html part verbatim if one is present so
+            // the reading pane has rich HTML to render.
+            let html: String?
+            if let htmlData = firstPart(payload, mimeType: "text/html")?.body?.data {
+                html = decodeBase64URL(htmlData)
+            } else {
+                html = nil
+            }
+            return (html, decoded)
         }
 
         if let htmlPart = firstPart(payload, mimeType: "text/html"),
@@ -195,16 +206,22 @@ public actor EagerBodyFetcher {
         return nil
     }
 
-    /// Decode a Gmail base64url-encoded body. Gmail strips padding; we
-    /// re-pad to a multiple of 4 and convert `-/_` back to `+//`.
+    /// Decode a Gmail base64url-encoded body. Gmail strips padding and (for
+    /// large bodies) may interleave whitespace/newlines; we strip whitespace,
+    /// re-pad to a multiple of 4, and convert `-/_` back to `+//`. Decoding
+    /// uses `.ignoreUnknownCharacters` so any residual non-base64 bytes are
+    /// tolerated instead of failing the whole row.
     static func decodeBase64URL(_ s: String) -> String? {
         var b = s.replacingOccurrences(of: "-", with: "+")
         b = b.replacingOccurrences(of: "_", with: "/")
+        // Padding length must be computed against the count of base64
+        // characters only — strip whitespace first so we don't over-pad.
+        b.removeAll { $0.isWhitespace || $0.isNewline }
         let rem = b.count % 4
         if rem != 0 {
             b.append(String(repeating: "=", count: 4 - rem))
         }
-        guard let data = Data(base64Encoded: b) else { return nil }
+        guard let data = Data(base64Encoded: b, options: [.ignoreUnknownCharacters]) else { return nil }
         return String(data: data, encoding: .utf8)
     }
 

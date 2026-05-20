@@ -62,6 +62,56 @@ final class EagerBodyFetcherTests: XCTestCase {
         return String(data: data, encoding: .utf8)!
     }
 
+    /// JSON for one GmailMessage whose payload is multipart/alternative with
+    /// BOTH a text/plain and a text/html part (the common shape Gmail returns
+    /// for HTML-bearing emails).
+    fileprivate static func plainAndHtmlMessageJSON(
+        id: String,
+        threadId: String,
+        plainText: String,
+        html: String
+    ) -> String {
+        let obj: [String: Any] = [
+            "id": id,
+            "threadId": threadId,
+            "payload": [
+                "mimeType": "multipart/alternative",
+                "parts": [
+                    [
+                        "mimeType": "text/plain",
+                        "body": ["data": base64URL(plainText), "size": plainText.utf8.count]
+                    ],
+                    [
+                        "mimeType": "text/html",
+                        "body": ["data": base64URL(html), "size": html.utf8.count]
+                    ]
+                ]
+            ]
+        ]
+        let data = try! JSONSerialization.data(withJSONObject: obj, options: [.sortedKeys])
+        return String(data: data, encoding: .utf8)!
+    }
+
+    /// JSON for a text/plain GmailMessage whose `body.data` has been polluted
+    /// with whitespace and newlines mid-string (simulating Gmail's behavior
+    /// for large bodies). Caller passes a custom base64url string verbatim.
+    fileprivate static func plainTextMessageJSONWithRawData(
+        id: String,
+        threadId: String,
+        rawBase64Data: String
+    ) -> String {
+        let obj: [String: Any] = [
+            "id": id,
+            "threadId": threadId,
+            "payload": [
+                "mimeType": "text/plain",
+                "body": ["data": rawBase64Data, "size": rawBase64Data.count]
+            ]
+        ]
+        let data = try! JSONSerialization.data(withJSONObject: obj, options: [.sortedKeys])
+        return String(data: data, encoding: .utf8)!
+    }
+
     /// JSON for one GmailMessage whose payload is a multipart with one
     /// text/html part only (no text/plain).
     fileprivate static func htmlOnlyMessageJSON(id: String, threadId: String, html: String) -> String {
@@ -365,5 +415,69 @@ final class EagerBodyFetcherTests: XCTestCase {
         XCTAssertNil(byID["gone"]?.2)
 
         XCTAssertEqual(progress.values, [2])
+    }
+
+    // MARK: - Test 8: Whitespace-polluted base64url body decodes correctly
+
+    func testLenientBase64DecodingIgnoresWhitespace() async throws {
+        let db = try makeDB()
+        let original = "Hello, lenient world! This is a test — fancy: ☃ ✓"
+        try insertMessage(in: db, id: "m1", threadId: "t1",
+                          date: Date(timeIntervalSince1970: 1_700_000_000))
+
+        // Compute the clean base64url, then inject whitespace and CRLFs in
+        // the middle to simulate Gmail's line-wrapped large bodies.
+        let clean = Self.base64URL(original)
+        XCTAssertGreaterThan(clean.count, 16, "need a long-enough string to split")
+        let midpoint = clean.index(clean.startIndex, offsetBy: clean.count / 2)
+        let firstHalf = String(clean[clean.startIndex..<midpoint])
+        let secondHalf = String(clean[midpoint..<clean.endIndex])
+        let secondHead = String(secondHalf.prefix(4))
+        let secondTail = String(secondHalf.dropFirst(4))
+        let polluted = firstHalf + "\r\n" + secondHead + " " + secondTail
+
+        Self.installBatchHandler(boundary: "rbG") { id in
+            (200, Self.plainTextMessageJSONWithRawData(
+                id: id, threadId: "t1", rawBase64Data: polluted))
+        }
+
+        let fetcher = EagerBodyFetcher(
+            client: MessagesListTests.makeClient(),
+            db: db.queue,
+            accountID: "acct-1"
+        )
+        try await fetcher.fetchTopInbox()
+
+        let row = try await db.queue.read { try Message.fetchOne($0, key: "m1") }
+        XCTAssertEqual(row?.bodyText, original)
+        XCTAssertNotNil(row?.bodyFetchedAt,
+                        "polluted body must still mark the row as fetched")
+    }
+
+    // MARK: - Test 9: multipart/alternative populates BOTH bodyText and bodyHtml
+
+    func testMultipartAlternativePopulatesBothBodyTextAndBodyHtml() async throws {
+        let db = try makeDB()
+        let plainText = "Hello from the plain part — line two."
+        let html = "<html><body><p>Hello from the <b>HTML</b> part</p></body></html>"
+        try insertMessage(in: db, id: "m1", threadId: "t1",
+                          date: Date(timeIntervalSince1970: 1_700_000_000))
+
+        Self.installBatchHandler(boundary: "rbH") { id in
+            (200, Self.plainAndHtmlMessageJSON(
+                id: id, threadId: "t1", plainText: plainText, html: html))
+        }
+
+        let fetcher = EagerBodyFetcher(
+            client: MessagesListTests.makeClient(),
+            db: db.queue,
+            accountID: "acct-1"
+        )
+        try await fetcher.fetchTopInbox()
+
+        let row = try await db.queue.read { try Message.fetchOne($0, key: "m1") }
+        XCTAssertEqual(row?.bodyText, plainText)
+        XCTAssertEqual(row?.bodyHtml, html, "raw HTML must be preserved verbatim")
+        XCTAssertNotNil(row?.bodyFetchedAt)
     }
 }
