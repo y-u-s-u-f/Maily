@@ -2,6 +2,8 @@ import Foundation
 
 public struct BatchSubrequest: Sendable {
     public let method: String
+    /// Absolute Gmail API path — must begin with `/gmail/v1/` (Gmail batch
+    /// subrequests use the full API path, not a path relative to the user).
     public let path: String
     public let body: Data?
     public let contentType: String?
@@ -105,10 +107,21 @@ extension GmailClient {
     }
 
     static func decodeBatchBody(_ data: Data, boundary: String) throws -> [BatchSubresponse] {
-        // Split on `--boundary`. The first chunk is the preamble (usually
-        // empty); the last is the closing `--` followed by epilogue.
-        let delim = Data("--\(boundary)".utf8)
-        let chunks = data.split(separator: delim)
+        // Per RFC 2046, the boundary delimiter line is `CRLF--boundary`, with
+        // the CRLF anchoring the boundary to the start of a line. Splitting
+        // on just `--boundary` would incorrectly chop subresponse bodies
+        // that contain the boundary substring inline (common with large
+        // base64 message bodies). Prefix a synthetic CRLF so the very first
+        // delimiter, which has no preceding CRLF in the wire payload, also
+        // matches.
+        //
+        // We also can't use `Data.split(separator:)` here — that overload
+        // from `Sequence` treats the argument as a single element, not a
+        // subsequence, and silently produces wrong results.
+        let delim = Data("\r\n--\(boundary)".utf8)
+        var anchored = Data("\r\n".utf8)
+        anchored.append(data)
+        let chunks = Self.splitOnSubsequence(anchored, delim)
 
         var results: [BatchSubresponse] = []
         for chunk in chunks {
@@ -125,6 +138,22 @@ extension GmailClient {
             results.append(sub)
         }
         return results
+    }
+
+    /// Split `data` on every non-overlapping occurrence of the byte
+    /// subsequence `delim`. Empty chunks between adjacent delimiters are
+    /// preserved (callers can filter them).
+    private static func splitOnSubsequence(_ data: Data, _ delim: Data) -> [Data] {
+        guard !delim.isEmpty else { return [data] }
+        var chunks: [Data] = []
+        var cursor = data.startIndex
+        while cursor < data.endIndex,
+              let r = data.range(of: delim, in: cursor..<data.endIndex) {
+            chunks.append(data.subdata(in: cursor..<r.lowerBound))
+            cursor = r.upperBound
+        }
+        chunks.append(data.subdata(in: cursor..<data.endIndex))
+        return chunks
     }
 
     /// Each part is: outer headers, blank line, embedded HTTP response
@@ -200,18 +229,20 @@ extension GmailClient {
     }
 
     private static func stripLeadingCRLF(_ data: Data) -> Data {
-        var d = data
-        while d.first == 0x0D || d.first == 0x0A {
-            d = d.dropFirst()
+        var i = data.startIndex
+        while i < data.endIndex, data[i] == 0x0D || data[i] == 0x0A {
+            i = data.index(after: i)
         }
-        return d
+        return data.subdata(in: i..<data.endIndex)
     }
 
     private static func stripTrailingCRLF(_ data: Data) -> Data {
-        var d = data
-        while d.last == 0x0D || d.last == 0x0A {
-            d = d.dropLast()
+        var end = data.endIndex
+        while end > data.startIndex {
+            let prev = data.index(before: end)
+            if data[prev] != 0x0D && data[prev] != 0x0A { break }
+            end = prev
         }
-        return d
+        return data.subdata(in: data.startIndex..<end)
     }
 }

@@ -240,6 +240,63 @@ final class BatchTests: XCTestCase {
         }
     }
 
+    func testBoundaryStringInsideSubresponseBody() async throws {
+        // Regression: the splitter must not chop a subresponse body just
+        // because the body text happens to contain the boundary substring.
+        // Use a deterministic boundary so we can embed it in the payload.
+        let responseBoundary = "collide-xyz"
+        let collidingBody = "prefix --\(responseBoundary) suffix \(responseBoundary)"
+        StubURLProtocol.handler = { req in
+            if let t = self.tokenResponse(req) { return t }
+            let respBody = self.makeBatchResponseBody(boundary: responseBoundary, parts: [
+                (200, "OK", [("Content-Type", "text/plain")], collidingBody),
+                (200, "OK", [("Content-Type", "application/json")], #"{"id":"b"}"#),
+            ])
+            let resp = HTTPURLResponse(
+                url: req.url!,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: ["Content-Type": "multipart/mixed; boundary=\(responseBoundary)"]
+            )!
+            return (resp, respBody)
+        }
+        let client = GmailClientTests.makeClient()
+        let out = try await client.batch([
+            BatchSubrequest(method: "GET", path: "/gmail/v1/users/me/messages/a"),
+            BatchSubrequest(method: "GET", path: "/gmail/v1/users/me/messages/b"),
+        ])
+        XCTAssertEqual(out.count, 2)
+        // The first body must contain the boundary substring intact — not
+        // truncated at the colliding prefix.
+        XCTAssertEqual(String(data: out[0].body, encoding: .utf8), collidingBody)
+        XCTAssertEqual(String(data: out[1].body, encoding: .utf8), #"{"id":"b"}"#)
+    }
+
+    func testQuotedBoundaryInResponseContentType() async throws {
+        // Pin parseBoundary's quoted-value branch.
+        let responseBoundary = "abc"
+        StubURLProtocol.handler = { req in
+            if let t = self.tokenResponse(req) { return t }
+            let respBody = self.makeBatchResponseBody(boundary: responseBoundary, parts: [
+                (200, "OK", [("Content-Type", "application/json")], #"{"id":"q"}"#),
+            ])
+            let resp = HTTPURLResponse(
+                url: req.url!,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: ["Content-Type": "multipart/mixed; boundary=\"\(responseBoundary)\""]
+            )!
+            return (resp, respBody)
+        }
+        let client = GmailClientTests.makeClient()
+        let out = try await client.batch([
+            BatchSubrequest(method: "GET", path: "/gmail/v1/users/me/messages/q"),
+        ])
+        XCTAssertEqual(out.count, 1)
+        XCTAssertEqual(out[0].status, 200)
+        XCTAssertEqual(String(data: out[0].body, encoding: .utf8), #"{"id":"q"}"#)
+    }
+
     func testFewerSubresponsesThanRequestsThrows() async throws {
         let responseBoundary = "rb-short"
         StubURLProtocol.handler = { req in
