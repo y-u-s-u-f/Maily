@@ -20,9 +20,16 @@ struct MailRootView: View {
     @ObservedObject var viewModel: InboxViewModel
     @State private var sidebarSelection: SidebarItem = .inbox
     @State private var selectedThreadID: String? = nil
+    @State private var commandHost: CommandHost?
 
     private var selectedThread: MailThread? {
         viewModel.threads.first { $0.id == selectedThreadID }
+    }
+
+    private var currentFocus: Focus {
+        // Best-effort focus inference until M-next wires real focus tracking.
+        if selectedThreadID != nil { return .reading }
+        return .list
     }
 
     var body: some View {
@@ -40,5 +47,16 @@ struct MailRootView: View {
                 .accessibilityIdentifier("ReadingPane")
         }
         .frame(minWidth: 720, minHeight: 480)
+        .task {
+            guard commandHost == nil else { return }
+            commandHost = await CommandHost.bootstrap(
+                contextProvider: { [self] in
+                    CommandContext(
+                        focus: self.currentFocus,
+                        selectedThreadID: self.selectedThreadID
+                    )
+                }
+            )
+        }
     }
 }
