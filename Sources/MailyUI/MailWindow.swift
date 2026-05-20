@@ -3,14 +3,30 @@ import MailyCore
 
 public struct MailWindow: Scene {
     @ObservedObject private var viewModel: InboxViewModel
+    private let accountID: String
+    private let threadRepo: ThreadRepository
+    private let messageRepo: MessageRepository
 
-    public init(viewModel: InboxViewModel) {
+    public init(
+        viewModel: InboxViewModel,
+        accountID: String,
+        threadRepo: ThreadRepository,
+        messageRepo: MessageRepository
+    ) {
         self.viewModel = viewModel
+        self.accountID = accountID
+        self.threadRepo = threadRepo
+        self.messageRepo = messageRepo
     }
 
     public var body: some Scene {
         Window("Maily", id: "mail-main") {
-            MailRootView(viewModel: viewModel)
+            MailRootView(
+                viewModel: viewModel,
+                accountID: accountID,
+                threadRepo: threadRepo,
+                messageRepo: messageRepo
+            )
         }
         .defaultSize(width: 1100, height: 680)
     }
@@ -18,11 +34,22 @@ public struct MailWindow: Scene {
 
 struct MailRootView: View {
     @ObservedObject var viewModel: InboxViewModel
+    @StateObject private var readingVM: ReadingPaneViewModel
     @State private var sidebarSelection: SidebarItem = .inbox
     @State private var selectedThreadID: String? = nil
 
-    private var selectedThread: MailThread? {
-        viewModel.threads.first { $0.id == selectedThreadID }
+    init(
+        viewModel: InboxViewModel,
+        accountID: String,
+        threadRepo: ThreadRepository,
+        messageRepo: MessageRepository
+    ) {
+        self.viewModel = viewModel
+        _readingVM = StateObject(wrappedValue: ReadingPaneViewModel(
+            accountID: accountID,
+            threadRepo: threadRepo,
+            messageRepo: messageRepo
+        ))
     }
 
     var body: some View {
@@ -35,10 +62,13 @@ struct MailRootView: View {
                 .frame(minWidth: 320, idealWidth: 320, maxWidth: 320)
                 .accessibilityIdentifier("ThreadList")
         } detail: {
-            ReadingPaneView(thread: selectedThread)
+            ReadingPaneView(viewModel: readingVM)
                 .frame(minWidth: 400)
                 .accessibilityIdentifier("ReadingPane")
         }
         .frame(minWidth: 720, minHeight: 480)
+        .onChange(of: selectedThreadID) { _, newValue in
+            Task { await readingVM.setSelection(newValue) }
+        }
     }
 }
