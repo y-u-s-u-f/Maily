@@ -1,94 +1,38 @@
 import SwiftUI
 import AppKit
+import MailyCore
 
-// MARK: - Thread row data model
+// MARK: - Timestamp formatter
 
-public struct ThreadRow: Identifiable, Equatable, Sendable {
-    public let id: String
-    public let sender: String
-    public let to: String
-    public let subject: String
-    public let snippet: String
-    public let timestamp: String
+private let threadTimeFormatter: DateFormatter = {
+    let f = DateFormatter()
+    f.timeStyle = .short
+    f.dateStyle = .none
+    return f
+}()
 
-    public init(id: String, sender: String, to: String, subject: String, snippet: String, timestamp: String) {
-        self.id = id
-        self.sender = sender
-        self.to = to
-        self.subject = subject
-        self.snippet = snippet
-        self.timestamp = timestamp
+private let threadDateFormatter: DateFormatter = {
+    let f = DateFormatter()
+    f.dateStyle = .short
+    f.timeStyle = .none
+    return f
+}()
+
+private func formatTimestamp(_ date: Date?) -> String {
+    guard let date else { return "" }
+    if Calendar.current.isDateInToday(date) {
+        return threadTimeFormatter.string(from: date)
     }
+    return threadDateFormatter.string(from: date)
 }
-
-// MARK: - Hardcoded sample threads
-
-public let sampleThreads: [ThreadRow] = [
-    ThreadRow(
-        id: "t1",
-        sender: "GitHub",
-        to: "yusuf@maily.app",
-        subject: "Your pull request was merged",
-        snippet: "PR #42 'feat: add mail window scaffold' was merged into main.",
-        timestamp: "9:14 AM"
-    ),
-    ThreadRow(
-        id: "t2",
-        sender: "App Store Connect",
-        to: "yusuf@maily.app",
-        subject: "Weekly summary for Maily",
-        snippet: "Crash-free rate: 99.8 %. 12 new downloads this week.",
-        timestamp: "Yesterday"
-    ),
-    ThreadRow(
-        id: "t3",
-        sender: "stripe-receipts@stripe.com",
-        to: "yusuf@maily.app",
-        subject: "Your receipt from Stripe",
-        snippet: "You were charged $9.00 on May 19, 2026 for Maily Developer Plan.",
-        timestamp: "Mon"
-    ),
-    ThreadRow(
-        id: "t4",
-        sender: "mom@example.com",
-        to: "yusuf@maily.app",
-        subject: "Dinner this Friday?",
-        snippet: "Hey, are you free Friday evening? Dad wants to try that new place downtown.",
-        timestamp: "Sun"
-    ),
-    ThreadRow(
-        id: "t5",
-        sender: "noreply@notion.so",
-        to: "yusuf@maily.app",
-        subject: "[Notion] Someone mentioned you",
-        snippet: "Yusuf mentioned you in the page \"Maily roadmap\": @you check this out.",
-        timestamp: "Sat"
-    ),
-    ThreadRow(
-        id: "t6",
-        sender: "team@linear.app",
-        to: "yusuf@maily.app",
-        subject: "Issue assigned: M4-α MailWindow scaffold",
-        snippet: "A new issue has been assigned to you in the Maily project.",
-        timestamp: "Fri"
-    ),
-    ThreadRow(
-        id: "t7",
-        sender: "alerts@cloudflare.com",
-        to: "yusuf@maily.app",
-        subject: "DNS record updated for maily.app",
-        snippet: "A DNS record was updated on your account. If this was not you, contact support.",
-        timestamp: "Thu"
-    ),
-]
 
 // MARK: - NSTableView coordinator
 
 public final class ThreadTableCoordinator: NSObject, NSTableViewDataSource, NSTableViewDelegate {
-    var threads: [ThreadRow]
+    var threads: [MailThread]
     var onSelect: (String?) -> Void
 
-    init(threads: [ThreadRow], onSelect: @escaping (String?) -> Void) {
+    init(threads: [MailThread], onSelect: @escaping (String?) -> Void) {
         self.threads = threads
         self.onSelect = onSelect
     }
@@ -127,9 +71,8 @@ public final class ThreadTableCoordinator: NSObject, NSTableViewDataSource, NSTa
 // MARK: - Custom cell view
 
 final class ThreadCellView: NSView {
-    private let senderLabel = NSTextField(labelWithString: "")
-    private let timestampLabel = NSTextField(labelWithString: "")
     private let subjectLabel = NSTextField(labelWithString: "")
+    private let timestampLabel = NSTextField(labelWithString: "")
     private let snippetLabel = NSTextField(labelWithString: "")
 
     override init(frame: NSRect) {
@@ -143,34 +86,28 @@ final class ThreadCellView: NSView {
     }
 
     private func setupSubviews() {
-        senderLabel.font = .systemFont(ofSize: 13, weight: .semibold)
-        senderLabel.lineBreakMode = .byTruncatingTail
+        subjectLabel.font = .systemFont(ofSize: 13, weight: .semibold)
+        subjectLabel.lineBreakMode = .byTruncatingTail
         timestampLabel.font = .systemFont(ofSize: 11)
         timestampLabel.textColor = .secondaryLabelColor
         timestampLabel.alignment = .right
-        subjectLabel.font = .systemFont(ofSize: 12)
-        subjectLabel.lineBreakMode = .byTruncatingTail
         snippetLabel.font = .systemFont(ofSize: 11)
         snippetLabel.textColor = .secondaryLabelColor
         snippetLabel.lineBreakMode = .byTruncatingTail
 
-        for v in [senderLabel, timestampLabel, subjectLabel, snippetLabel] {
+        for v in [subjectLabel, timestampLabel, snippetLabel] {
             v.translatesAutoresizingMaskIntoConstraints = false
             addSubview(v)
         }
 
         NSLayoutConstraint.activate([
-            senderLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
-            senderLabel.topAnchor.constraint(equalTo: topAnchor, constant: 8),
+            subjectLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
+            subjectLabel.topAnchor.constraint(equalTo: topAnchor, constant: 8),
 
-            timestampLabel.leadingAnchor.constraint(equalTo: senderLabel.trailingAnchor, constant: 4),
+            timestampLabel.leadingAnchor.constraint(equalTo: subjectLabel.trailingAnchor, constant: 4),
             timestampLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
             timestampLabel.topAnchor.constraint(equalTo: topAnchor, constant: 8),
-            timestampLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 80),
-
-            subjectLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
-            subjectLabel.topAnchor.constraint(equalTo: senderLabel.bottomAnchor, constant: 2),
-            subjectLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
+            timestampLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 100),
 
             snippetLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
             snippetLabel.topAnchor.constraint(equalTo: subjectLabel.bottomAnchor, constant: 2),
@@ -178,11 +115,10 @@ final class ThreadCellView: NSView {
         ])
     }
 
-    func configure(with thread: ThreadRow) {
-        senderLabel.stringValue = thread.sender
-        timestampLabel.stringValue = thread.timestamp
-        subjectLabel.stringValue = thread.subject
-        snippetLabel.stringValue = thread.snippet
+    func configure(with thread: MailThread) {
+        subjectLabel.stringValue = thread.subject ?? ""
+        timestampLabel.stringValue = formatTimestamp(thread.lastMessageAt)
+        snippetLabel.stringValue = thread.snippet ?? ""
         setAccessibilityIdentifier("thread-cell-\(thread.id)")
     }
 }
@@ -190,10 +126,10 @@ final class ThreadCellView: NSView {
 // MARK: - NSViewRepresentable wrapper
 
 public struct ThreadListView: NSViewRepresentable {
-    public let threads: [ThreadRow]
+    public let threads: [MailThread]
     @Binding public var selectedThreadID: String?
 
-    public init(threads: [ThreadRow], selectedThreadID: Binding<String?>) {
+    public init(threads: [MailThread], selectedThreadID: Binding<String?>) {
         self.threads = threads
         _selectedThreadID = selectedThreadID
     }
@@ -240,7 +176,6 @@ public struct ThreadListView: NSViewRepresentable {
             selectedThreadID = id
         }
 
-        // Sync selection from state
         if let id = selectedThreadID,
            let idx = threads.firstIndex(where: { $0.id == id }) {
             if tableView.selectedRow != idx {
