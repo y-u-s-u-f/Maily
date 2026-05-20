@@ -40,6 +40,16 @@ public struct MessageRepository {
         }
     }
 
+    public func observeInboxUnread(accountId: String) -> ValueObservation<ValueReducers.Fetch<[Message]>> {
+        ValueObservation.tracking { db in
+            try Message
+                .filter(Column("account_id") == accountId)
+                .filter(sql: "label_ids_json LIKE '%\"INBOX\"%' AND label_ids_json LIKE '%\"UNREAD\"%'")
+                .order(Column("date"))
+                .fetchAll(db)
+        }
+    }
+
     public func messagesMissingBody(accountId: String, limit: Int) throws -> [Message] {
         try queue.read { db in
             try Message
