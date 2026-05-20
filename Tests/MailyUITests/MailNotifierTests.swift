@@ -38,18 +38,6 @@ final class MailNotifierTests: XCTestCase {
         return (db, MessageRepository(queue: db.queue), threads)
     }
 
-    private func waitUntil(
-        timeout: TimeInterval = 1.0,
-        _ check: @MainActor () -> Bool
-    ) async -> Bool {
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            if check() { return true }
-            try? await Task.sleep(nanoseconds: 20_000_000)
-        }
-        return check()
-    }
-
     private func waitUntilAsync(
         timeout: TimeInterval = 1.0,
         _ check: @Sendable () async -> Bool
